@@ -158,6 +158,8 @@ CPU_ZERO_COUNT=0
 
 LAST_FRAME_HASH=""
 
+STANDBY_MARKER="/tmp/videokiosk2-midori-start"
+
 log() {
     local level="$1"
     shift
@@ -175,6 +177,40 @@ launch_midori() {
         midori -e SingleWindow -e Fullscreen "$BROWSER_URL" >/dev/null 2>&1
     else
         log "INFO" "Midori already running"
+    fi
+}
+
+check_standby_timer() {
+    if [[ -f "$STANDBY_MARKER" ]]; then
+        local marker_epoch
+        marker_epoch=$(cat "$STANDBY_MARKER" 2>/dev/null)
+        if [[ "$marker_epoch" =~ ^[0-9]+$ ]]; then
+            local now_epoch elapsed
+            now_epoch=$(date +%s)
+            elapsed=$(( now_epoch - marker_epoch ))
+            if (( elapsed >= 3600 )); then
+                log "INFO" "Midori failover active for ${elapsed}s (>= 1 hour)"
+                rm -f "$STANDBY_MARKER"
+                if [[ -x "/home/pi/tvStandby.sh" ]]; then
+                    log "INFO" "Running tvStandby.sh"
+                    /home/pi/tvStandby.sh || log "WARN" "tvStandby.sh exited with code $?"
+                fi
+            fi
+        fi
+    fi
+}
+
+mark_midori_start() {
+    if [[ ! -f "$STANDBY_MARKER" ]]; then
+        date +%s > "$STANDBY_MARKER"
+        log "INFO" "Standby timer started (1 hour)"
+    fi
+}
+
+clear_standby_timer() {
+    if [[ -f "$STANDBY_MARKER" ]]; then
+        rm -f "$STANDBY_MARKER"
+        log "INFO" "Standby timer cleared (VLC active)"
     fi
 }
 
@@ -203,15 +239,18 @@ get_cpu_usage() {
 }
 
 sleep 20
+check_standby_timer
 start_vlc
 sleep 5
 
 if ! vlc_running; then
     log "ERROR" "VLC failed to start"
     launch_midori
+    mark_midori_start
     exit 0
 fi
 
+clear_standby_timer
 log "INFO" "VLC appears to be running. Entering monitoring loop."
 
 START_TIME=$(date +%s)
@@ -261,6 +300,7 @@ while vlc_running; do
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
         launch_midori
+        mark_midori_start
         exit 0
     fi
 
@@ -268,6 +308,7 @@ while vlc_running; do
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
         launch_midori
+        mark_midori_start
         exit 0
     fi
 
@@ -276,6 +317,7 @@ done
 
 log "WARN" "VLC exited unexpectedly. Launching Midori."
 launch_midori
+mark_midori_start
 exit 0
 EOF
 
@@ -512,6 +554,10 @@ if tid:
             echo "$trigger_id" > "$STATE_FILE"
             last_trigger_id="$trigger_id"
             log "INFO" "Restart completed for trigger $trigger_id"
+            if [[ -x "/home/pi/tvOn.sh" ]]; then
+                log "INFO" "Running tvOn.sh"
+                /home/pi/tvOn.sh || log "WARN" "tvOn.sh exited with code $?"
+            fi
         else
             log "ERROR" "Restart command failed for trigger $trigger_id"
         fi
