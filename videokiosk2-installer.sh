@@ -322,6 +322,11 @@ exit 0
 EOF
 
     if [[ -f "$WRAPPER_PATH" ]]; then
+        if diff -u "$WRAPPER_PATH" "$tmpfile" >/dev/null 2>&1; then
+            echo "$WRAPPER_PATH is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
         echo
         echo "Existing $WRAPPER_PATH found. Showing diff:"
         diff -u "$WRAPPER_PATH" "$tmpfile" || true
@@ -354,6 +359,11 @@ BROWSER_URL="$BROWSER_URL"
 LOCALEOF
 
     if [[ -f "$conf_path" ]]; then
+        if diff -u "$conf_path" "$tmpfile" >/dev/null 2>&1; then
+            echo "$conf_path is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
         echo
         echo "Existing $conf_path found. Showing diff:"
         diff -u "$conf_path" "$tmpfile" || true
@@ -571,6 +581,11 @@ EOF
     sed -i "s|__RESTART_DELAY_MINUTES__|$RESTART_DELAY_MINUTES|g" "$tmpfile"
 
     if [[ -f "$SCHEDULER_SCRIPT_PATH" ]]; then
+        if diff -u "$SCHEDULER_SCRIPT_PATH" "$tmpfile" >/dev/null 2>&1; then
+            echo "$SCHEDULER_SCRIPT_PATH is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
         echo
         echo "Existing $SCHEDULER_SCRIPT_PATH found. Showing diff:"
         diff -u "$SCHEDULER_SCRIPT_PATH" "$tmpfile" || true
@@ -622,6 +637,11 @@ WantedBy=multi-user.target
 EOF
 
     if [[ -f "$SERVICE_PATH" ]]; then
+        if diff -u "$SERVICE_PATH" "$tmpfile" >/dev/null 2>&1; then
+            echo "$SERVICE_PATH is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
         echo
         echo "Existing $SERVICE_PATH found. Showing diff:"
         diff -u "$SERVICE_PATH" "$tmpfile" || true
@@ -662,6 +682,11 @@ WantedBy=multi-user.target
 EOF
 
     if [[ -f "$SCHEDULER_SERVICE_PATH" ]]; then
+        if diff -u "$SCHEDULER_SERVICE_PATH" "$tmpfile" >/dev/null 2>&1; then
+            echo "$SCHEDULER_SERVICE_PATH is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
         echo
         echo "Existing $SCHEDULER_SERVICE_PATH found. Showing diff:"
         diff -u "$SCHEDULER_SERVICE_PATH" "$tmpfile" || true
