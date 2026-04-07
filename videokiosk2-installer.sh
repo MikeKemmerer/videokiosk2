@@ -9,6 +9,14 @@ SCHEDULER_SERVICE_NAME="videokiosk2-scheduler.service"
 SCHEDULER_SERVICE_PATH="/etc/systemd/system/$SCHEDULER_SERVICE_NAME"
 SCHEDULER_SCRIPT_PATH="/home/pi/videokiosk2-restart-scheduler.sh"
 
+GPIO_SERVICE_NAME="videokiosk2-gpio-restart.service"
+GPIO_SERVICE_PATH="/etc/systemd/system/$GPIO_SERVICE_NAME"
+GPIO_SCRIPT_PATH="/home/pi/videokiosk2-gpio-restart.sh"
+GPIO_SUDOERS_PATH="/etc/sudoers.d/videokiosk2-gpio-restart"
+DEFAULT_GPIO_PIN=17
+INSTALL_GPIO=0
+GPIO_PIN=$DEFAULT_GPIO_PIN
+
 DEFAULT_URL="http://your-stream-server:8086/0.ts"
 DEFAULT_BROWSER_URL="http://your-calendar-server:8000"
 DEFAULT_SCHEDULE_URL="http://your-calendar-server:8000/api/service-restart-schedule"
@@ -40,6 +48,9 @@ require_root() {
 
 install_packages() {
     local required=(vlc midori x11-apps curl python3)
+    if (( INSTALL_GPIO == 1 )); then
+        required+=(gpiod)
+    fi
     local missing=()
     local pkg
 
@@ -99,6 +110,23 @@ prompt_browser_url() {
     echo "Using failover browser URL: $BROWSER_URL"
 }
 
+prompt_gpio_button() {
+    echo
+    read -r -p "Install GPIO button restart monitor? (y/N): " gpio_ans
+    if [[ "$gpio_ans" == "y" || "$gpio_ans" == "Y" ]]; then
+        INSTALL_GPIO=1
+        read -r -p "GPIO pin number [default: $DEFAULT_GPIO_PIN]: " gpio_pin_input
+        GPIO_PIN="${gpio_pin_input:-$DEFAULT_GPIO_PIN}"
+        if [[ ! "$GPIO_PIN" =~ ^[0-9]+$ ]] || (( GPIO_PIN < 2 || GPIO_PIN > 27 )); then
+            echo "Invalid GPIO pin: $GPIO_PIN (must be 2-27)" >&2
+            exit 1
+        fi
+        echo "GPIO restart button will use pin $GPIO_PIN"
+    else
+        echo "Skipping GPIO button monitor."
+    fi
+}
+
 prompt_restart_delay_minutes() {
     echo
     read -r -p "Enter restart delay in minutes [default: ${DEFAULT_RESTART_DELAY_MINUTES}] (press Enter or 0 for no delay): " RESTART_DELAY_MINUTES
@@ -125,6 +153,11 @@ stop_service_if_running() {
     if systemctl is-active --quiet "$SCHEDULER_SERVICE_NAME"; then
         echo "Stopping existing $SCHEDULER_SERVICE_NAME..."
         systemctl stop "$SCHEDULER_SERVICE_NAME"
+    fi
+
+    if systemctl is-active --quiet "$GPIO_SERVICE_NAME"; then
+        echo "Stopping existing $GPIO_SERVICE_NAME..."
+        systemctl stop "$GPIO_SERVICE_NAME"
     fi
 }
 
@@ -706,6 +739,162 @@ EOF
     systemctl daemon-reload
 }
 
+write_gpio_script() {
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    cat > "$tmpfile" <<'GPIOEOF'
+#!/bin/bash
+set -euo pipefail
+
+GPIO_CHIP=gpiochip0
+GPIO_PIN=__GPIO_PIN__
+DEBOUNCE_SECONDS=30
+SERVICE_NAME="videokiosk2.service"
+
+log() {
+    local level="$1"
+    shift
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "$ts videokiosk2.gpio-restart $level $*"
+    logger -t videokiosk2-gpio "$level $*"
+}
+
+log "INFO" "Monitoring GPIO pin ${GPIO_PIN} on ${GPIO_CHIP} for button press (debounce=${DEBOUNCE_SECONDS}s)"
+
+last_restart_epoch=0
+
+while read -r _line; do
+    now_epoch=$(date +%s)
+    elapsed=$(( now_epoch - last_restart_epoch ))
+
+    if (( elapsed < DEBOUNCE_SECONDS )); then
+        log "INFO" "Button press ignored (${elapsed}s since last restart, debounce=${DEBOUNCE_SECONDS}s)"
+        continue
+    fi
+
+    log "INFO" "Button press detected on GPIO ${GPIO_PIN} — restarting ${SERVICE_NAME}"
+    if sudo systemctl restart "$SERVICE_NAME"; then
+        last_restart_epoch=$(date +%s)
+        log "INFO" "Restart completed successfully"
+        if [[ -x "/home/pi/tvOn.sh" ]]; then
+            log "INFO" "Running tvOn.sh"
+            /home/pi/tvOn.sh || log "WARN" "tvOn.sh exited with code $?"
+        fi
+    else
+        log "ERROR" "Restart command failed"
+    fi
+done < <(gpiomon --chip "$GPIO_CHIP" --falling-edge --bias=pull-up "$GPIO_PIN")
+GPIOEOF
+
+    sed -i "s|__GPIO_PIN__|$GPIO_PIN|g" "$tmpfile"
+
+    if [[ -f "$GPIO_SCRIPT_PATH" ]]; then
+        if diff -u "$GPIO_SCRIPT_PATH" "$tmpfile" >/dev/null 2>&1; then
+            echo "$GPIO_SCRIPT_PATH is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
+        echo
+        echo "Existing $GPIO_SCRIPT_PATH found. Showing diff:"
+        diff -u "$GPIO_SCRIPT_PATH" "$tmpfile" || true
+        read -r -p "Overwrite $GPIO_SCRIPT_PATH? (y/N): " ans
+        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+            echo "Keeping existing GPIO restart script."
+            rm -f "$tmpfile"
+            return
+        fi
+        cp "$GPIO_SCRIPT_PATH" "$GPIO_SCRIPT_PATH.bak"
+    fi
+
+    mv "$tmpfile" "$GPIO_SCRIPT_PATH"
+    chown pi:pi "$GPIO_SCRIPT_PATH"
+    chmod 755 "$GPIO_SCRIPT_PATH"
+    echo "Installed GPIO restart script at $GPIO_SCRIPT_PATH"
+}
+
+write_gpio_service() {
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    cat > "$tmpfile" <<EOF
+[Unit]
+Description=videokiosk2 GPIO Button Restart Monitor
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=$GPIO_SCRIPT_PATH
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    if [[ -f "$GPIO_SERVICE_PATH" ]]; then
+        if diff -u "$GPIO_SERVICE_PATH" "$tmpfile" >/dev/null 2>&1; then
+            echo "$GPIO_SERVICE_PATH is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
+        echo
+        echo "Existing $GPIO_SERVICE_PATH found. Showing diff:"
+        diff -u "$GPIO_SERVICE_PATH" "$tmpfile" || true
+        read -r -p "Overwrite $GPIO_SERVICE_PATH? (y/N): " ans
+        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+            echo "Keeping existing GPIO service file."
+            rm -f "$tmpfile"
+            return
+        fi
+        cp "$GPIO_SERVICE_PATH" "$GPIO_SERVICE_PATH.bak"
+    fi
+
+    mv "$tmpfile" "$GPIO_SERVICE_PATH"
+    chmod 644 "$GPIO_SERVICE_PATH"
+    echo "Installed GPIO service at $GPIO_SERVICE_PATH"
+
+    systemctl daemon-reload
+}
+
+write_gpio_polkit_rule() {
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    cat > "$tmpfile" <<'SUDOERSEOF'
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl restart videokiosk2.service
+SUDOERSEOF
+
+    if [[ -f "$GPIO_SUDOERS_PATH" ]]; then
+        if diff -u "$GPIO_SUDOERS_PATH" "$tmpfile" >/dev/null 2>&1; then
+            echo "$GPIO_SUDOERS_PATH is already up to date."
+            rm -f "$tmpfile"
+            return
+        fi
+        echo
+        echo "Existing $GPIO_SUDOERS_PATH found. Showing diff:"
+        diff -u "$GPIO_SUDOERS_PATH" "$tmpfile" || true
+        read -r -p "Overwrite $GPIO_SUDOERS_PATH? (y/N): " ans
+        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+            echo "Keeping existing sudoers rule."
+            rm -f "$tmpfile"
+            return
+        fi
+    fi
+
+    if ! visudo -cf "$tmpfile" >/dev/null 2>&1; then
+        echo "ERROR: sudoers syntax check failed. Skipping." >&2
+        rm -f "$tmpfile"
+        return
+    fi
+
+    mv "$tmpfile" "$GPIO_SUDOERS_PATH"
+    chmod 440 "$GPIO_SUDOERS_PATH"
+    echo "Installed sudoers rule at $GPIO_SUDOERS_PATH"
+}
+
 enable_and_start_service() {
     systemctl enable "$SERVICE_NAME"
     systemctl enable "$SCHEDULER_SERVICE_NAME"
@@ -715,22 +904,33 @@ enable_and_start_service() {
     fi
 
     systemctl start "$SCHEDULER_SERVICE_NAME"
+
+    if (( INSTALL_GPIO == 1 )); then
+        systemctl enable "$GPIO_SERVICE_NAME"
+        systemctl start "$GPIO_SERVICE_NAME"
+    fi
 }
 
 main() {
     require_root
     load_existing_config
-    install_packages
     prompt_url
     prompt_browser_url
     prompt_schedule_url
     prompt_restart_delay_minutes
+    prompt_gpio_button
+    install_packages
     stop_service_if_running
     write_wrapper
     write_local_conf
     write_scheduler_script
     write_service
     write_scheduler_service
+    if (( INSTALL_GPIO == 1 )); then
+        write_gpio_script
+        write_gpio_service
+        write_gpio_polkit_rule
+    fi
     enable_and_start_service
     echo "Installer completed."
 }
