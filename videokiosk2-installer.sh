@@ -47,7 +47,7 @@ require_root() {
 }
 
 install_packages() {
-    local required=(vlc midori x11-apps curl python3)
+    local required=(vlc midori x11-apps curl python3 cec-utils)
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
     fi
