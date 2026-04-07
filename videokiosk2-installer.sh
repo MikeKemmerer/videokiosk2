@@ -778,10 +778,10 @@ while read -r _line; do
     if sudo systemctl restart "$SERVICE_NAME"; then
         last_restart_epoch=$(date +%s)
         log "INFO" "Restart completed successfully"
-        if [[ -x "/home/pi/tvOn.sh" ]]; then
-            log "INFO" "Running tvOn.sh"
-            /home/pi/tvOn.sh || log "WARN" "tvOn.sh exited with code $?"
-        fi
+        log "INFO" "Sending CEC power-on and active-source commands"
+        timeout 5 bash -c 'echo "on 0" | cec-client -s -d 1' 2>/dev/null || log "WARN" "CEC power-on timed out or failed"
+        sleep 2
+        timeout 5 bash -c 'echo "as" | cec-client -s -d 1' 2>/dev/null || log "WARN" "CEC active-source timed out or failed"
     else
         log "ERROR" "Restart command failed"
     fi
