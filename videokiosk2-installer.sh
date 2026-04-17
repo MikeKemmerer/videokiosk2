@@ -17,7 +17,7 @@ DEFAULT_GPIO_PIN=17
 INSTALL_GPIO=0
 GPIO_PIN=$DEFAULT_GPIO_PIN
 
-DEFAULT_URL="http://your-stream-server:8086/0.ts"
+DEFAULT_URL="http://your-stream-server:8086/2.ts"
 DEFAULT_BROWSER_URL="http://your-calendar-server:8000"
 DEFAULT_SCHEDULE_URL="http://your-calendar-server:8000/api/service-restart-schedule"
 DEFAULT_RESTART_DELAY_MINUTES=0
@@ -168,7 +168,7 @@ write_wrapper() {
     cat > "$tmpfile" <<'EOF'
 #!/bin/bash
 
-STREAM_URL="http://your-stream-server:8086/0.ts"
+STREAM_URL="http://your-stream-server:8086/2.ts"
 BROWSER_URL="http://your-calendar-server:8000"
 
 # Source local overrides if present (created by installer or manually)
