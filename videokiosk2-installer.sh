@@ -370,6 +370,7 @@ command_for_prerequisite() {
             fi
             ;;
         x11-apps) command -v xwd ;;
+        x11-xserver-utils) command -v xset ;;
         cec-utils) command -v cec-client ;;
         gpiod) command -v gpiomon ;;
         *) command -v "$prerequisite" ;;
@@ -389,6 +390,9 @@ report_unavailable_prerequisites() {
                 ;;
             x11-apps)
                 echo "  - xwd screen capture command (normally provided by x11-apps)"
+                ;;
+            x11-xserver-utils)
+                echo "  - xset X11 utility (normally provided by x11-xserver-utils)"
                 ;;
             cec-utils)
                 echo "  - cec-client command (normally provided by cec-utils)"
