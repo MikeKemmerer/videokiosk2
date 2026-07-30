@@ -3,9 +3,14 @@
 STREAM_URL="http://your-stream-server:8086/0.ts"
 BROWSER_URL="http://your-calendar-server:8000"
 
-# Source local overrides if present (created by installer or manually)
+# Source generated configuration, retaining the legacy adjacent config fallback
+# for manually run copies of this wrapper.
+CONFIG_PATH="${VIDEOKIOSK2_CONFIG:-/etc/videokiosk2/local.conf}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "$SCRIPT_DIR/local.conf" ]]; then
+if [[ -f "$CONFIG_PATH" ]]; then
+    # shellcheck source=/etc/videokiosk2/local.conf
+    source "$CONFIG_PATH"
+elif [[ -f "$SCRIPT_DIR/local.conf" ]]; then
     # shellcheck source=local.conf
     source "$SCRIPT_DIR/local.conf"
 fi
