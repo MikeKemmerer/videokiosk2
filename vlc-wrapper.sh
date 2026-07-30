@@ -81,16 +81,22 @@ midori_command() {
 }
 
 launch_midori() {
-    local midori_path
+    local midori_path midori_status
     if ! pgrep -x midori >/dev/null; then
         if ! midori_path=$(midori_command); then
             log "ERROR" "Midori failover is unavailable: install Midori and restart videokiosk2"
             return 1
         fi
         log "INFO" "Launching Midori failover browser with X11 backend"
-        if ! env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
-            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$MIDORI_LOG" 2>&1; then
-            log "ERROR" "Midori exited unexpectedly; see $MIDORI_LOG"
+        : >"$MIDORI_LOG"
+        env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
+            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$MIDORI_LOG" 2>&1
+        midori_status=$?
+        if (( midori_status != 0 )); then
+            if [[ "$midori_path" == /snap/bin/* ]] && command -v snap >/dev/null 2>&1; then
+                snap logs midori -n=50 >>"$MIDORI_LOG" 2>&1 || true
+            fi
+            log "ERROR" "Midori exited with status $midori_status; see $MIDORI_LOG"
             return 1
         fi
     else
@@ -103,6 +109,12 @@ start_vlc() {
 
     env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" \
         --no-video-title-show \
+        --no-interact \
+        --no-qt-error-dialogs \
+        --no-qt-privacy-ask \
+        --no-qt-updates-notif \
+        --no-qt-system-tray \
+        --qt-notification=0 \
         --quiet \
         >>"$VLC_LOG" 2>&1 &
 
