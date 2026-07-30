@@ -2,16 +2,26 @@
 set -e
 
 SERVICE_NAME="videokiosk2.service"
-WRAPPER_PATH="/home/pi/vlc-wrapper.sh"
+KIOSK_USER="${KIOSK_USER:-}"
+KIOSK_HOME="${KIOSK_HOME:-}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/videokiosk2}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/videokiosk2}"
+CONFIG_PATH="$CONFIG_DIR/local.conf"
+STATE_DIR="${STATE_DIR:-/var/lib/videokiosk2}"
+X_DISPLAY="${X_DISPLAY:-:0}"
+XAUTHORITY_PATH="${XAUTHORITY_PATH:-}"
+HOOK_DIR="${HOOK_DIR:-}"
+
+WRAPPER_PATH="$INSTALL_DIR/vlc-wrapper.sh"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
 
 SCHEDULER_SERVICE_NAME="videokiosk2-scheduler.service"
 SCHEDULER_SERVICE_PATH="/etc/systemd/system/$SCHEDULER_SERVICE_NAME"
-SCHEDULER_SCRIPT_PATH="/home/pi/videokiosk2-restart-scheduler.sh"
+SCHEDULER_SCRIPT_PATH="$INSTALL_DIR/videokiosk2-restart-scheduler.sh"
 
 GPIO_SERVICE_NAME="videokiosk2-gpio-restart.service"
 GPIO_SERVICE_PATH="/etc/systemd/system/$GPIO_SERVICE_NAME"
-GPIO_SCRIPT_PATH="/home/pi/videokiosk2-gpio-restart.sh"
+GPIO_SCRIPT_PATH="$INSTALL_DIR/videokiosk2-gpio-restart.sh"
 GPIO_SUDOERS_PATH="/etc/sudoers.d/videokiosk2-gpio-restart"
 DEFAULT_GPIO_PIN=17
 INSTALL_GPIO=0
@@ -22,10 +32,123 @@ DEFAULT_BROWSER_URL="http://your-calendar-server:8000"
 DEFAULT_SCHEDULE_URL="http://your-calendar-server:8000/api/service-restart-schedule"
 DEFAULT_RESTART_DELAY_MINUTES=0
 
+usage() {
+    cat <<EOF
+Usage: sudo bash videokiosk2-installer.sh [options]
+
+Options:
+  --kiosk-user USER   Run the kiosk as an existing desktop user.
+  --install-dir PATH  Store managed runtime scripts (default: /opt/videokiosk2).
+  --config-dir PATH   Store generated configuration (default: /etc/videokiosk2).
+  --x-display DISPLAY X11 display to use (default: :0).
+  --xauthority PATH   Xauthority file for the kiosk user (default: USER home/.Xauthority).
+  -h, --help          Show this help.
+EOF
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kiosk-user)
+                KIOSK_USER="${2:-}"
+                [[ -n "$KIOSK_USER" ]] || { echo "--kiosk-user requires a user." >&2; exit 1; }
+                shift 2
+                ;;
+            --install-dir)
+                INSTALL_DIR="${2:-}"
+                [[ -n "$INSTALL_DIR" ]] || { echo "--install-dir requires a path." >&2; exit 1; }
+                shift 2
+                ;;
+            --config-dir)
+                CONFIG_DIR="${2:-}"
+                [[ -n "$CONFIG_DIR" ]] || { echo "--config-dir requires a path." >&2; exit 1; }
+                shift 2
+                ;;
+            --x-display)
+                X_DISPLAY="${2:-}"
+                [[ -n "$X_DISPLAY" ]] || { echo "--x-display requires a display." >&2; exit 1; }
+                shift 2
+                ;;
+            --xauthority)
+                XAUTHORITY_PATH="${2:-}"
+                [[ -n "$XAUTHORITY_PATH" ]] || { echo "--xauthority requires a path." >&2; exit 1; }
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                usage >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    WRAPPER_PATH="$INSTALL_DIR/vlc-wrapper.sh"
+    SCHEDULER_SCRIPT_PATH="$INSTALL_DIR/videokiosk2-restart-scheduler.sh"
+    GPIO_SCRIPT_PATH="$INSTALL_DIR/videokiosk2-gpio-restart.sh"
+    CONFIG_PATH="$CONFIG_DIR/local.conf"
+}
+
+resolve_kiosk_user() {
+    local default_user
+
+    if [[ -z "$KIOSK_USER" ]]; then
+        if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+            default_user="$SUDO_USER"
+        elif id pi >/dev/null 2>&1; then
+            default_user="pi"
+        else
+            echo "Unable to determine the kiosk user. Use --kiosk-user USER." >&2
+            exit 1
+        fi
+
+        if [[ -t 0 ]]; then
+            read -r -p "Kiosk desktop user [default: $default_user]: " KIOSK_USER
+            KIOSK_USER="${KIOSK_USER:-$default_user}"
+        else
+            KIOSK_USER="$default_user"
+        fi
+    fi
+
+    id "$KIOSK_USER" >/dev/null 2>&1 || {
+        echo "Kiosk user does not exist: $KIOSK_USER" >&2
+        exit 1
+    }
+    [[ "$KIOSK_USER" != "root" ]] || {
+        echo "Kiosk user must be a non-root desktop user." >&2
+        exit 1
+    }
+
+    if [[ -z "$KIOSK_HOME" ]]; then
+        KIOSK_HOME=$(getent passwd "$KIOSK_USER" | cut -d: -f6)
+    fi
+    [[ -n "$KIOSK_HOME" && -d "$KIOSK_HOME" ]] || {
+        echo "Kiosk home directory does not exist: $KIOSK_HOME" >&2
+        exit 1
+    }
+
+    XAUTHORITY_PATH="${XAUTHORITY_PATH:-$KIOSK_HOME/.Xauthority}"
+    HOOK_DIR="${HOOK_DIR:-$KIOSK_HOME}"
+    echo "Kiosk user: $KIOSK_USER ($KIOSK_HOME)"
+    echo "Managed scripts: $INSTALL_DIR"
+    echo "Generated configuration: $CONFIG_PATH"
+}
+
+prepare_directories() {
+    install -d -o root -g root -m 755 "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
+}
+
 load_existing_config() {
-    local conf_dir
-    conf_dir="$(dirname "$WRAPPER_PATH")"
-    local conf_path="$conf_dir/local.conf"
+    local conf_path="$CONFIG_PATH"
+    local legacy_config="$KIOSK_HOME/local.conf"
+
+    if [[ ! -f "$conf_path" && -f "$legacy_config" ]]; then
+        conf_path="$legacy_config"
+        echo "Found legacy config at $legacy_config -- it will be migrated to $CONFIG_PATH."
+    fi
 
     if [[ -f "$conf_path" ]]; then
         echo "Found existing config at $conf_path -- loading as defaults."
@@ -252,10 +375,10 @@ STREAM_URL="http://your-stream-server:8086/2.ts"
 BROWSER_URL="http://your-calendar-server:8000"
 
 # Source local overrides if present (created by installer or manually)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "$SCRIPT_DIR/local.conf" ]]; then
-    # shellcheck source=local.conf
-    source "$SCRIPT_DIR/local.conf"
+CONFIG_PATH="__CONFIG_PATH__"
+if [[ -f "$CONFIG_PATH" ]]; then
+    # shellcheck source=/etc/videokiosk2/local.conf
+    source "$CONFIG_PATH"
 fi
 
 THRESHOLD=5
@@ -319,9 +442,9 @@ check_standby_timer() {
             if (( elapsed >= 3600 )); then
                 log "INFO" "Midori failover active for ${elapsed}s (>= 1 hour)"
                 rm -f "$STANDBY_MARKER"
-                if [[ -x "/home/pi/tvStandby.sh" ]]; then
+                if [[ -x "__HOOK_DIR__/tvStandby.sh" ]]; then
                     log "INFO" "Running tvStandby.sh"
-                    /home/pi/tvStandby.sh || log "WARN" "tvStandby.sh exited with code $?"
+                    __HOOK_DIR__/tvStandby.sh || log "WARN" "tvStandby.sh exited with code $?"
                 fi
             fi
         fi
@@ -449,6 +572,9 @@ mark_midori_start
 exit 0
 EOF
 
+    sed -i "s|__CONFIG_PATH__|$CONFIG_PATH|g" "$tmpfile"
+    sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
+
     if [[ -f "$WRAPPER_PATH" ]]; then
         if diff -u "$WRAPPER_PATH" "$tmpfile" >/dev/null 2>&1; then
             echo "$WRAPPER_PATH is already up to date."
@@ -468,15 +594,13 @@ EOF
     fi
 
     mv "$tmpfile" "$WRAPPER_PATH"
-    chown pi:pi "$WRAPPER_PATH"
+    chown root:root "$WRAPPER_PATH"
     chmod 755 "$WRAPPER_PATH"
     echo "Installed wrapper at $WRAPPER_PATH"
 }
 
 write_local_conf() {
-    local conf_dir
-    conf_dir="$(dirname "$WRAPPER_PATH")"
-    local conf_path="$conf_dir/local.conf"
+    local conf_path="$CONFIG_PATH"
     local tmpfile
     tmpfile=$(mktemp)
 
@@ -505,7 +629,7 @@ LOCALEOF
     fi
 
     mv "$tmpfile" "$conf_path"
-    chown pi:pi "$conf_path"
+    chown root:root "$conf_path"
     chmod 644 "$conf_path"
     echo "Installed local config at $conf_path"
 }
@@ -692,9 +816,9 @@ if tid:
             echo "$trigger_id" > "$STATE_FILE"
             last_trigger_id="$trigger_id"
             log "INFO" "Restart completed for trigger $trigger_id"
-            if [[ -x "/home/pi/tvOn.sh" ]]; then
+            if [[ -x "__HOOK_DIR__/tvOn.sh" ]]; then
                 log "INFO" "Running tvOn.sh"
-                /home/pi/tvOn.sh || log "WARN" "tvOn.sh exited with code $?"
+                __HOOK_DIR__/tvOn.sh || log "WARN" "tvOn.sh exited with code $?"
             fi
         else
             log "ERROR" "Restart command failed for trigger $trigger_id"
@@ -707,6 +831,7 @@ EOF
 
     sed -i "s|__SCHEDULE_URL__|$SCHEDULE_URL|g" "$tmpfile"
     sed -i "s|__RESTART_DELAY_MINUTES__|$RESTART_DELAY_MINUTES|g" "$tmpfile"
+    sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
 
     if [[ -f "$SCHEDULER_SCRIPT_PATH" ]]; then
         if diff -u "$SCHEDULER_SCRIPT_PATH" "$tmpfile" >/dev/null 2>&1; then
@@ -756,9 +881,9 @@ ExecStop=/usr/bin/pkill -TERM -f vlc-wrapper.sh
 ExecStopPost=/usr/bin/pkill -TERM vlc
 ExecStopPost=/usr/bin/pkill -TERM midori
 
-User=pi
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
+User=$KIOSK_USER
+Environment=DISPLAY=$X_DISPLAY
+Environment=XAUTHORITY=$XAUTHORITY_PATH
 
 [Install]
 WantedBy=multi-user.target
@@ -904,7 +1029,7 @@ GPIOEOF
     fi
 
     mv "$tmpfile" "$GPIO_SCRIPT_PATH"
-    chown pi:pi "$GPIO_SCRIPT_PATH"
+    chown root:root "$GPIO_SCRIPT_PATH"
     chmod 755 "$GPIO_SCRIPT_PATH"
     echo "Installed GPIO restart script at $GPIO_SCRIPT_PATH"
 }
@@ -923,7 +1048,7 @@ Type=simple
 ExecStart=$GPIO_SCRIPT_PATH
 Restart=always
 RestartSec=5
-User=pi
+User=$KIOSK_USER
 
 [Install]
 WantedBy=multi-user.target
@@ -958,8 +1083,8 @@ write_gpio_polkit_rule() {
     local tmpfile
     tmpfile=$(mktemp)
 
-    cat > "$tmpfile" <<'SUDOERSEOF'
-pi ALL=(root) NOPASSWD: /usr/bin/systemctl restart videokiosk2.service
+    cat > "$tmpfile" <<SUDOERSEOF
+$KIOSK_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart videokiosk2.service
 SUDOERSEOF
 
     if [[ -f "$GPIO_SUDOERS_PATH" ]]; then
@@ -1007,7 +1132,10 @@ enable_and_start_service() {
 }
 
 main() {
+    parse_arguments "$@"
     require_root
+    resolve_kiosk_user
+    prepare_directories
     load_existing_config
     prompt_url
     prompt_browser_url

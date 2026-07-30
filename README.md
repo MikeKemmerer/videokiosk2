@@ -18,6 +18,19 @@ Run the installer as root on a Raspberry Pi with a connected display:
 sudo bash videokiosk2-installer.sh
 ```
 
+On Ubuntu, the installer selects the non-root user that owns the X11 desktop.
+You can set it explicitly when needed:
+
+```bash
+sudo bash videokiosk2-installer.sh --kiosk-user videokiosk
+```
+
+Managed scripts are installed in `/opt/videokiosk2` and generated settings in
+`/etc/videokiosk2/local.conf`, rather than in the kiosk user's home directory.
+The user's home directory remains the location for optional `tvOn.sh` and
+`tvStandby.sh` hooks. Existing `/home/<user>/local.conf` files are read as
+defaults during the first upgrade and then migrated to `/etc/videokiosk2`.
+
 The installer will prompt for:
 - **Video feed URL** — the HLS/MPEG-TS stream endpoint
 - **Failover browser URL** — the page to show when the stream is unavailable
