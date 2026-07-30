@@ -98,10 +98,8 @@ resolve_kiosk_user() {
     if [[ -z "$KIOSK_USER" ]]; then
         if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
             default_user="$SUDO_USER"
-        elif id pi >/dev/null 2>&1; then
-            default_user="pi"
         else
-            echo "Unable to determine the kiosk user. Use --kiosk-user USER." >&2
+            echo "Unable to determine a non-root kiosk user. Use --kiosk-user USER." >&2
             exit 1
         fi
 
