@@ -45,6 +45,12 @@ different package manager; Midori is accepted from either `PATH` or
 `/snap/bin/midori`. If a prerequisite remains unavailable, the installer
 lists it at the end so it can be installed manually before retrying.
 
+On Ubuntu, the generated kiosk, scheduler, and optional GPIO services use a
+`videokiosk2` AppArmor profile. It starts in complain mode so a display is not
+blocked by a host-specific VLC, browser, or X11 dependency. Review
+`journalctl -k | grep apparmor` and switch to enforcement after reviewing the
+profile: `sudo aa-enforce /etc/apparmor.d/videokiosk2`.
+
 ## How It Works
 
 1. `vlc-wrapper.sh` starts VLC in fullscreen and monitors for frozen frames (via screen-capture hashing) and low/zero CPU usage.

@@ -18,6 +18,8 @@ fi
 THRESHOLD=5
 STARTUP_GRACE=20
 CHECK_INTERVAL=5
+VLC_LOG="/tmp/videokiosk2-vlc.log"
+MIDORI_LOG="/tmp/videokiosk2-midori.log"
 
 CPU_IDLE_THRESHOLD=2
 PREV_CPU=20
@@ -56,8 +58,12 @@ launch_midori() {
             log "ERROR" "Midori failover is unavailable: install Midori and restart videokiosk2"
             return 1
         fi
-        log "INFO" "Launching Midori failover browser"
-        "$midori_path" -e SingleWindow -e Fullscreen "$BROWSER_URL" >/dev/null 2>&1
+        log "INFO" "Launching Midori failover browser with X11 backend"
+        if ! env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
+            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$MIDORI_LOG" 2>&1; then
+            log "ERROR" "Midori exited unexpectedly; see $MIDORI_LOG"
+            return 1
+        fi
     else
         log "INFO" "Midori already running"
     fi
@@ -66,14 +72,14 @@ launch_midori() {
 start_vlc() {
     log "INFO" "Starting VLC with URL: $STREAM_URL"
 
-    vlc -f "$STREAM_URL" \
+    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" \
         --no-video-title-show \
         --quiet \
-        >/dev/null 2>&1 &
+        >>"$VLC_LOG" 2>&1 &
 
     VLC_PID=$!
 
-    log "INFO" "VLC started with PID $VLC_PID"
+    log "INFO" "VLC started with PID $VLC_PID (log: $VLC_LOG)"
 }
 
 vlc_running() {
@@ -92,7 +98,7 @@ start_vlc
 sleep 5
 
 if ! vlc_running; then
-    log "ERROR" "VLC failed to start"
+    log "ERROR" "VLC failed to start; see $VLC_LOG"
     launch_midori
     exit 0
 fi
