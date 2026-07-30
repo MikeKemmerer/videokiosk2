@@ -34,10 +34,25 @@ log() {
     logger -t vlc-wrapper "$line"
 }
 
+midori_command() {
+    if command -v midori >/dev/null 2>&1; then
+        command -v midori
+    elif [[ -x /snap/bin/midori ]]; then
+        printf '%s\n' /snap/bin/midori
+    else
+        return 1
+    fi
+}
+
 launch_midori() {
+    local midori_path
     if ! pgrep -x midori >/dev/null; then
+        if ! midori_path=$(midori_command); then
+            log "ERROR" "Midori failover is unavailable: install Midori and restart videokiosk2"
+            return 1
+        fi
         log "INFO" "Launching Midori failover browser"
-        midori -e SingleWindow -e Fullscreen "$BROWSER_URL" >/dev/null 2>&1
+        "$midori_path" -e SingleWindow -e Fullscreen "$BROWSER_URL" >/dev/null 2>&1
     else
         log "INFO" "Midori already running"
     fi

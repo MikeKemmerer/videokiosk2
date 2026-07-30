@@ -46,16 +46,67 @@ require_root() {
     fi
 }
 
+command_for_prerequisite() {
+    local prerequisite="$1"
+
+    case "$prerequisite" in
+        midori)
+            if command -v midori >/dev/null 2>&1; then
+                command -v midori
+            elif [[ -x /snap/bin/midori ]]; then
+                printf '%s\n' /snap/bin/midori
+            else
+                return 1
+            fi
+            ;;
+        x11-apps) command -v xwd ;;
+        cec-utils) command -v cec-client ;;
+        gpiod) command -v gpiomon ;;
+        *) command -v "$prerequisite" ;;
+    esac
+}
+
+report_unavailable_prerequisites() {
+    local -a unavailable=("$@")
+    local prerequisite
+
+    echo
+    echo "The following prerequisites are still unavailable:"
+    for prerequisite in "${unavailable[@]}"; do
+        case "$prerequisite" in
+            midori)
+                echo "  - Midori browser (install a 'midori' command or /snap/bin/midori)"
+                ;;
+            x11-apps)
+                echo "  - xwd screen capture command (normally provided by x11-apps)"
+                ;;
+            cec-utils)
+                echo "  - cec-client command (normally provided by cec-utils)"
+                ;;
+            gpiod)
+                echo "  - gpiomon command (normally provided by gpiod)"
+                ;;
+            *)
+                echo "  - $prerequisite command"
+                ;;
+        esac
+    done
+    echo "Install the missing prerequisite manually, then run this installer again."
+}
+
 install_packages() {
     local required=(vlc midori x11-apps curl python3 cec-utils)
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
     fi
     local missing=()
-    local pkg
+    local unavailable=()
+    local pkg command_path
 
     for pkg in "${required[@]}"; do
-        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        if command_path=$(command_for_prerequisite "$pkg" 2>/dev/null); then
+            echo "Found $pkg prerequisite: $command_path"
+        else
             missing+=("$pkg")
         fi
     done
@@ -65,10 +116,39 @@ install_packages() {
         return
     fi
 
-    echo "Missing packages detected: ${missing[*]}"
-    echo "Updating package lists and installing missing prerequisites..."
-    apt update -y
-    apt install -y "${missing[@]}"
+    echo "Missing prerequisites detected: ${missing[*]}"
+    echo "Updating package lists before checking available APT packages..."
+    if ! apt update -y; then
+        echo "WARNING: apt update failed; attempting installation with the existing package cache." >&2
+    fi
+
+    for pkg in "${missing[@]}"; do
+        if ! apt-cache show "$pkg" >/dev/null 2>&1; then
+            echo "APT does not provide package '$pkg' on this host."
+            unavailable+=("$pkg")
+            continue
+        fi
+
+        echo "Installing APT package: $pkg"
+        if ! apt install -y "$pkg"; then
+            echo "APT could not install package '$pkg'." >&2
+            unavailable+=("$pkg")
+        fi
+    done
+
+    for pkg in "${required[@]}"; do
+        if ! command_for_prerequisite "$pkg" >/dev/null 2>&1; then
+            unavailable+=("$pkg")
+        fi
+    done
+
+    if [[ ${#unavailable[@]} -gt 0 ]]; then
+        mapfile -t unavailable < <(printf '%s\n' "${unavailable[@]}" | sort -u)
+        report_unavailable_prerequisites "${unavailable[@]}"
+        return 1
+    fi
+
+    echo "All prerequisites are available."
 }
 
 prompt_url() {
@@ -204,10 +284,25 @@ log() {
     logger -t vlc-wrapper "$line"
 }
 
+midori_command() {
+    if command -v midori >/dev/null 2>&1; then
+        command -v midori
+    elif [[ -x /snap/bin/midori ]]; then
+        printf '%s\n' /snap/bin/midori
+    else
+        return 1
+    fi
+}
+
 launch_midori() {
+    local midori_path
     if ! pgrep -x midori >/dev/null; then
+        if ! midori_path=$(midori_command); then
+            log "ERROR" "Midori failover is unavailable: install Midori and restart videokiosk2"
+            return 1
+        fi
         log "INFO" "Launching Midori failover browser"
-        midori -e SingleWindow -e Fullscreen "$BROWSER_URL" >/dev/null 2>&1
+        "$midori_path" -e SingleWindow -e Fullscreen "$BROWSER_URL" >/dev/null 2>&1
     else
         log "INFO" "Midori already running"
     fi

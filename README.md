@@ -24,6 +24,14 @@ The installer will prompt for:
 - **Schedule API URL** — endpoint providing restart trigger timing
 - **Restart delay** — minutes to wait before acting on a restart trigger
 
+### Prerequisites
+
+The installer checks for the executable each feature needs before asking APT to
+install a package. This allows an Ubuntu host to use a browser installed by a
+different package manager; Midori is accepted from either `PATH` or
+`/snap/bin/midori`. If a prerequisite remains unavailable, the installer
+lists it at the end so it can be installed manually before retrying.
+
 ## How It Works
 
 1. `vlc-wrapper.sh` starts VLC in fullscreen and monitors for frozen frames (via screen-capture hashing) and low/zero CPU usage.
