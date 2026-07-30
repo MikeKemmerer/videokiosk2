@@ -41,6 +41,35 @@ log() {
     logger -t vlc-wrapper "$line"
 }
 
+resolve_x11_session() {
+    local candidate runtime_dir
+    local -a candidates=()
+
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export XDG_RUNTIME_DIR="$runtime_dir"
+    [[ -n "${XAUTHORITY:-}" ]] && candidates+=("$XAUTHORITY")
+    candidates+=("$HOME/.Xauthority")
+
+    while IFS= read -r -d '' candidate; do
+        candidates+=("$candidate")
+    done < <(
+        find "$runtime_dir" "$HOME" -maxdepth 3 -type f \
+            \( -name '.Xauthority' -o -name 'Xauthority' -o -name '.mutter-Xwaylandauth.*' \) \
+            -print0 2>/dev/null
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -r "$candidate" ]] && DISPLAY="$DISPLAY" XAUTHORITY="$candidate" xset q >/dev/null 2>&1; then
+            export XAUTHORITY="$candidate"
+            log "INFO" "Using Xauthority file: $XAUTHORITY"
+            return
+        fi
+    done
+
+    log "ERROR" "Cannot authorize X11 display $DISPLAY; no usable Xauthority file was found"
+    return 1
+}
+
 midori_command() {
     if command -v midori >/dev/null 2>&1; then
         command -v midori
@@ -93,6 +122,7 @@ get_cpu_usage() {
     [[ -z "$cpu" ]] && echo 0 || echo "$cpu"
 }
 
+resolve_x11_session || exit 1
 sleep 20
 start_vlc
 sleep 5

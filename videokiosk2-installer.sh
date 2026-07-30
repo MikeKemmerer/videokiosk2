@@ -10,6 +10,8 @@ CONFIG_PATH="$CONFIG_DIR/local.conf"
 STATE_DIR="${STATE_DIR:-/var/lib/videokiosk2}"
 X_DISPLAY="${X_DISPLAY:-:0}"
 XAUTHORITY_PATH="${XAUTHORITY_PATH:-}"
+XAUTHORITY_EXPLICIT=0
+XDG_RUNTIME_DIR_PATH="${XDG_RUNTIME_DIR_PATH:-}"
 HOOK_DIR="${HOOK_DIR:-}"
 APPARMOR_PROFILE_NAME="videokiosk2"
 APPARMOR_SERVICE_DIRECTIVE=""
@@ -45,7 +47,7 @@ Options:
   --install-dir PATH  Store managed runtime scripts (default: /opt/videokiosk2).
   --config-dir PATH   Store generated configuration (default: /etc/videokiosk2).
   --x-display DISPLAY X11 display to use (default: :0).
-  --xauthority PATH   Xauthority file for the kiosk user (default: USER home/.Xauthority).
+    --xauthority PATH   Xauthority file for the kiosk user (auto-detected by default).
     --configure-apparmor-only  Reload the Ubuntu AppArmor profile and service drop-ins.
   -h, --help          Show this help.
 EOF
@@ -77,6 +79,7 @@ parse_arguments() {
             --xauthority)
                 XAUTHORITY_PATH="${2:-}"
                 [[ -n "$XAUTHORITY_PATH" ]] || { echo "--xauthority requires a path." >&2; exit 1; }
+                XAUTHORITY_EXPLICIT=1
                 shift 2
                 ;;
             --configure-apparmor-only)
@@ -102,7 +105,7 @@ parse_arguments() {
 }
 
 resolve_kiosk_user() {
-    local default_user
+    local default_user kiosk_uid
 
     if [[ -z "$KIOSK_USER" ]]; then
         if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
@@ -137,11 +140,65 @@ resolve_kiosk_user() {
         exit 1
     }
 
-    XAUTHORITY_PATH="${XAUTHORITY_PATH:-$KIOSK_HOME/.Xauthority}"
+    kiosk_uid=$(id -u "$KIOSK_USER")
+    XDG_RUNTIME_DIR_PATH="${XDG_RUNTIME_DIR_PATH:-/run/user/$kiosk_uid}"
+    discover_xauthority
     HOOK_DIR="${HOOK_DIR:-$KIOSK_HOME}"
     echo "Kiosk user: $KIOSK_USER ($KIOSK_HOME)"
+    echo "X11 display: $X_DISPLAY (authority: $XAUTHORITY_PATH)"
     echo "Managed scripts: $INSTALL_DIR"
     echo "Generated configuration: $CONFIG_PATH"
+}
+
+can_access_x_display() {
+    local candidate="$1"
+
+    [[ -r "$candidate" ]] || return 1
+    command -v xset >/dev/null 2>&1 || return 1
+    runuser -u "$KIOSK_USER" -- env \
+        DISPLAY="$X_DISPLAY" \
+        XAUTHORITY="$candidate" \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR_PATH" \
+        xset q >/dev/null 2>&1
+}
+
+discover_xauthority() {
+    local candidate kiosk_uid
+    local -a candidates=()
+
+    kiosk_uid=$(id -u "$KIOSK_USER")
+    if [[ $XAUTHORITY_EXPLICIT -eq 1 ]]; then
+        if ! can_access_x_display "$XAUTHORITY_PATH"; then
+            echo "Warning: --xauthority could not access $X_DISPLAY: $XAUTHORITY_PATH" >&2
+        fi
+        return
+    fi
+    candidates+=("$KIOSK_HOME/.Xauthority")
+
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] && candidates+=("$candidate")
+    done < <(
+        ps -eo args= | sed -n 's/.*[[:space:]]-auth[[:space:]]\([^[:space:]]*\).*/\1/p'
+    )
+
+    while IFS= read -r -d '' candidate; do
+        candidates+=("$candidate")
+    done < <(
+        find "$KIOSK_HOME" "/run/user/$kiosk_uid" -maxdepth 3 -type f \
+            \( -name '.Xauthority' -o -name 'Xauthority' -o -name '.mutter-Xwaylandauth.*' \) \
+            -print0 2>/dev/null
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if can_access_x_display "$candidate"; then
+            XAUTHORITY_PATH="$candidate"
+            return
+        fi
+    done
+
+    XAUTHORITY_PATH="${XAUTHORITY_PATH:-$KIOSK_HOME/.Xauthority}"
+    echo "Warning: could not verify X11 authorization for $X_DISPLAY; using $XAUTHORITY_PATH." >&2
+    echo "Rerun with --xauthority PATH after finding a file that passes xset q." >&2
 }
 
 prepare_directories() {
@@ -224,6 +281,7 @@ profile $APPARMOR_PROFILE_NAME flags=(complain) {
   /bin/** rix,
   /usr/bin/** rix,
   /usr/sbin/** rix,
+    /usr/lib/cargo/bin/coreutils/** rix,
   /snap/bin/** rix,
   /lib/** mr,
   /usr/lib/** mr,
@@ -347,7 +405,7 @@ report_unavailable_prerequisites() {
 }
 
 install_packages() {
-    local required=(vlc midori x11-apps curl python3 cec-utils)
+    local required=(vlc midori x11-apps x11-xserver-utils curl python3 cec-utils)
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
     fi
@@ -538,6 +596,35 @@ log() {
     logger -t vlc-wrapper "$line"
 }
 
+resolve_x11_session() {
+    local candidate runtime_dir
+    local -a candidates=()
+
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export XDG_RUNTIME_DIR="$runtime_dir"
+    [[ -n "${XAUTHORITY:-}" ]] && candidates+=("$XAUTHORITY")
+    candidates+=("$HOME/.Xauthority")
+
+    while IFS= read -r -d '' candidate; do
+        candidates+=("$candidate")
+    done < <(
+        find "$runtime_dir" "$HOME" -maxdepth 3 -type f \
+            \( -name '.Xauthority' -o -name 'Xauthority' -o -name '.mutter-Xwaylandauth.*' \) \
+            -print0 2>/dev/null
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -r "$candidate" ]] && DISPLAY="$DISPLAY" XAUTHORITY="$candidate" xset q >/dev/null 2>&1; then
+            export XAUTHORITY="$candidate"
+            log "INFO" "Using Xauthority file: $XAUTHORITY"
+            return
+        fi
+    done
+
+    log "ERROR" "Cannot authorize X11 display $DISPLAY; no usable Xauthority file was found"
+    return 1
+}
+
 midori_command() {
     if command -v midori >/dev/null 2>&1; then
         command -v midori
@@ -624,6 +711,7 @@ get_cpu_usage() {
     [[ -z "$cpu" ]] && echo 0 || echo "$cpu"
 }
 
+resolve_x11_session || exit 1
 sleep 20
 check_standby_timer
 start_vlc
@@ -1020,6 +1108,7 @@ ExecStopPost=/usr/bin/pkill -TERM midori
 User=$KIOSK_USER
 Environment=DISPLAY=$X_DISPLAY
 Environment=XAUTHORITY=$XAUTHORITY_PATH
+Environment=XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR_PATH
 
 [Install]
 WantedBy=multi-user.target
