@@ -37,6 +37,11 @@ The installer will prompt for:
 - **Schedule API URL** — endpoint providing restart trigger timing
 - **Restart delay** — minutes to wait before acting on a restart trigger
 
+On a graphical Ubuntu host, the installer checks the active desktop's Xauthority
+files and records the one that can access the configured display. This avoids
+assuming that `~/.Xauthority` is valid for a Wayland/Xwayland desktop. Override
+the detected file only when needed with `--xauthority /path/to/Xauthority`.
+
 ### Prerequisites
 
 The installer checks for the executable each feature needs before asking APT to
