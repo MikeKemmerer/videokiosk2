@@ -119,6 +119,11 @@ falkon_command() {
 ensure_falkon_fullscreen() {
     local attempt window_id window_state
 
+    if ! command -v xprop >/dev/null 2>&1; then
+        log "WARN" "Cannot verify Falkon fullscreen because xprop is unavailable"
+        return
+    fi
+
     for attempt in {1..10}; do
         window_id=$(xdotool search --onlyvisible --class falkon 2>/dev/null | tail -n 1)
         if [[ -n "$window_id" ]]; then

@@ -475,6 +475,7 @@ command_for_prerequisite() {
         falkon) command -v falkon ;;
         x11-apps) command -v xwd ;;
         x11-xserver-utils) command -v xset ;;
+        x11-utils) command -v xprop ;;
         xdotool) command -v xdotool ;;
         cec-utils) command -v cec-client ;;
         gpiod) command -v gpiomon ;;
@@ -502,6 +503,9 @@ report_unavailable_prerequisites() {
             x11-xserver-utils)
                 echo "  - xset X11 utility (normally provided by x11-xserver-utils)"
                 ;;
+            x11-utils)
+                echo "  - xprop X11 utility (normally provided by x11-utils)"
+                ;;
             xdotool)
                 echo "  - xdotool X11 automation utility (normally provided by xdotool)"
                 ;;
@@ -522,7 +526,7 @@ report_unavailable_prerequisites() {
 install_packages() {
     local required=(vlc "$FAILOVER_BROWSER" x11-apps x11-xserver-utils curl python3 cec-utils)
     if [[ "$FAILOVER_BROWSER" == "falkon" ]]; then
-        required+=(xdotool)
+        required+=(x11-utils xdotool)
     fi
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
@@ -829,6 +833,11 @@ falkon_command() {
 
 ensure_falkon_fullscreen() {
     local attempt window_id window_state
+
+    if ! command -v xprop >/dev/null 2>&1; then
+        log "WARN" "Cannot verify Falkon fullscreen because xprop is unavailable"
+        return
+    fi
 
     for attempt in {1..10}; do
         window_id=$(xdotool search --onlyvisible --class falkon 2>/dev/null | tail -n 1)
@@ -1373,7 +1382,14 @@ EOF
 }
 
 write_service() {
-    local tmpfile
+    local tmpfile service_exec_stop service_xauthority_line
+
+    service_exec_stop="/usr/bin/pkill -TERM -f vlc-wrapper.sh"
+    service_xauthority_line="Environment=XAUTHORITY=$XAUTHORITY_PATH"
+    if ! is_raspberry_pi_os; then
+        service_exec_stop="-/usr/bin/pkill -TERM -f vlc-wrapper.sh"
+        service_xauthority_line=""
+    fi
     tmpfile=$(mktemp)
 
     cat > "$tmpfile" <<EOF
@@ -1393,13 +1409,13 @@ KillSignal=SIGTERM
 SendSIGKILL=yes
 TimeoutStopSec=5
 
-ExecStop=/usr/bin/pkill -TERM -f vlc-wrapper.sh
+ExecStop=$service_exec_stop
 ExecStopPost=-/usr/bin/pkill -TERM vlc
 ExecStopPost=-/usr/bin/pkill -TERM $FAILOVER_BROWSER
 
 User=$KIOSK_USER
 Environment=DISPLAY=$X_DISPLAY
-Environment=XAUTHORITY=$XAUTHORITY_PATH
+$service_xauthority_line
 Environment=XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR_PATH
 
 [Install]
