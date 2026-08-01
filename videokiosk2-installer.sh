@@ -37,6 +37,13 @@ DEFAULT_URL="http://your-stream-server:8086/2.ts"
 DEFAULT_BROWSER_URL="http://your-calendar-server:8000"
 DEFAULT_SCHEDULE_URL="http://your-calendar-server:8000/api/service-restart-schedule"
 DEFAULT_RESTART_DELAY_MINUTES=0
+FEED_URL="${FEED_URL:-}"
+BROWSER_URL="${BROWSER_URL:-}"
+SCHEDULE_URL="${SCHEDULE_URL:-}"
+RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-}"
+NON_INTERACTIVE=0
+ASSUME_YES=0
+GPIO_SELECTION_EXPLICIT=0
 
 usage() {
     cat <<EOF
@@ -48,6 +55,15 @@ Options:
   --config-dir PATH   Store generated configuration (default: /etc/videokiosk2).
   --x-display DISPLAY X11 display to use (default: :0).
     --xauthority PATH   Xauthority file for the kiosk user (auto-detected by default).
+    --feed-url URL       Video feed URL.
+    --browser-url URL    Failover browser URL.
+    --schedule-url URL   Restart schedule API URL.
+    --restart-delay-minutes MINUTES  Delay scheduled restarts by this many minutes.
+    --enable-gpio-restart  Install the GPIO restart button monitor.
+    --disable-gpio-restart Do not install the GPIO restart button monitor.
+    --gpio-pin PIN       GPIO pin for the restart button (also enables it).
+    --non-interactive    Require values through command-line options.
+    --yes                Overwrite installer-managed files without prompting.
     --configure-apparmor-only  Reload the Ubuntu AppArmor profile and service drop-ins.
   -h, --help          Show this help.
 EOF
@@ -81,6 +97,51 @@ parse_arguments() {
                 [[ -n "$XAUTHORITY_PATH" ]] || { echo "--xauthority requires a path." >&2; exit 1; }
                 XAUTHORITY_EXPLICIT=1
                 shift 2
+                ;;
+            --feed-url)
+                FEED_URL="${2:-}"
+                [[ -n "$FEED_URL" ]] || { echo "--feed-url requires a URL." >&2; exit 1; }
+                shift 2
+                ;;
+            --browser-url)
+                BROWSER_URL="${2:-}"
+                [[ -n "$BROWSER_URL" ]] || { echo "--browser-url requires a URL." >&2; exit 1; }
+                shift 2
+                ;;
+            --schedule-url)
+                SCHEDULE_URL="${2:-}"
+                [[ -n "$SCHEDULE_URL" ]] || { echo "--schedule-url requires a URL." >&2; exit 1; }
+                shift 2
+                ;;
+            --restart-delay-minutes)
+                RESTART_DELAY_MINUTES="${2:-}"
+                [[ -n "$RESTART_DELAY_MINUTES" ]] || { echo "--restart-delay-minutes requires minutes." >&2; exit 1; }
+                shift 2
+                ;;
+            --enable-gpio-restart)
+                INSTALL_GPIO=1
+                GPIO_SELECTION_EXPLICIT=1
+                shift
+                ;;
+            --disable-gpio-restart)
+                INSTALL_GPIO=0
+                GPIO_SELECTION_EXPLICIT=1
+                shift
+                ;;
+            --gpio-pin)
+                GPIO_PIN="${2:-}"
+                [[ -n "$GPIO_PIN" ]] || { echo "--gpio-pin requires a pin number." >&2; exit 1; }
+                INSTALL_GPIO=1
+                GPIO_SELECTION_EXPLICIT=1
+                shift 2
+                ;;
+            --non-interactive)
+                NON_INTERACTIVE=1
+                shift
+                ;;
+            --yes)
+                ASSUME_YES=1
+                shift
                 ;;
             --configure-apparmor-only)
                 APPARMOR_ONLY=1
@@ -197,8 +258,12 @@ discover_xauthority() {
     done
 
     XAUTHORITY_PATH="${XAUTHORITY_PATH:-$KIOSK_HOME/.Xauthority}"
-    echo "Warning: could not verify X11 authorization for $X_DISPLAY; using $XAUTHORITY_PATH." >&2
-    echo "Rerun with --xauthority PATH after finding a file that passes xset q." >&2
+    if pgrep -x Xorg >/dev/null 2>&1; then
+        echo "Warning: could not verify X11 authorization for $X_DISPLAY." >&2
+        echo "The service will retry discovery when it starts." >&2
+    else
+        echo "No active X11 session for $X_DISPLAY yet; authority discovery will run after graphical login."
+    fi
 }
 
 prepare_directories() {
@@ -282,6 +347,7 @@ profile $APPARMOR_PROFILE_NAME flags=(complain) {
   /usr/bin/** rix,
   /usr/sbin/** rix,
     /usr/lib/cargo/bin/coreutils/** rix,
+    /usr/bin/falkon ux,
   /snap/bin/** rix,
   /lib/** mr,
   /usr/lib/** mr,
@@ -360,17 +426,10 @@ command_for_prerequisite() {
     local prerequisite="$1"
 
     case "$prerequisite" in
-        midori)
-            if command -v midori >/dev/null 2>&1; then
-                command -v midori
-            elif [[ -x /snap/bin/midori ]]; then
-                printf '%s\n' /snap/bin/midori
-            else
-                return 1
-            fi
-            ;;
+        falkon) command -v falkon ;;
         x11-apps) command -v xwd ;;
         x11-xserver-utils) command -v xset ;;
+        xdotool) command -v xdotool ;;
         cec-utils) command -v cec-client ;;
         gpiod) command -v gpiomon ;;
         *) command -v "$prerequisite" ;;
@@ -385,14 +444,17 @@ report_unavailable_prerequisites() {
     echo "The following prerequisites are still unavailable:"
     for prerequisite in "${unavailable[@]}"; do
         case "$prerequisite" in
-            midori)
-                echo "  - Midori browser (install a 'midori' command or /snap/bin/midori)"
+            falkon)
+                echo "  - Falkon browser (normally provided by falkon)"
                 ;;
             x11-apps)
                 echo "  - xwd screen capture command (normally provided by x11-apps)"
                 ;;
             x11-xserver-utils)
                 echo "  - xset X11 utility (normally provided by x11-xserver-utils)"
+                ;;
+            xdotool)
+                echo "  - xdotool X11 automation utility (normally provided by xdotool)"
                 ;;
             cec-utils)
                 echo "  - cec-client command (normally provided by cec-utils)"
@@ -409,7 +471,7 @@ report_unavailable_prerequisites() {
 }
 
 install_packages() {
-    local required=(vlc midori x11-apps x11-xserver-utils curl python3 cec-utils)
+    local required=(vlc falkon x11-apps x11-xserver-utils xdotool curl python3 cec-utils)
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
     fi
@@ -466,9 +528,12 @@ install_packages() {
 }
 
 prompt_url() {
-    echo
-    read -r -p "Enter the video feed URL [default: $DEFAULT_URL]: " FEED_URL
-    FEED_URL="${FEED_URL:-$DEFAULT_URL}"
+    if [[ -z "$FEED_URL" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --feed-url." >&2; exit 1; }
+        echo
+        read -r -p "Enter the video feed URL [default: $DEFAULT_URL]: " FEED_URL
+        FEED_URL="${FEED_URL:-$DEFAULT_URL}"
+    fi
 
     if [[ ! "$FEED_URL" =~ ^https?://[^[:space:]]+$ ]]; then
         echo "Invalid URL format: $FEED_URL" >&2
@@ -479,9 +544,12 @@ prompt_url() {
 }
 
 prompt_schedule_url() {
-    echo
-    read -r -p "Enter restart schedule API URL [default: $DEFAULT_SCHEDULE_URL]: " SCHEDULE_URL
-    SCHEDULE_URL="${SCHEDULE_URL:-$DEFAULT_SCHEDULE_URL}"
+    if [[ -z "$SCHEDULE_URL" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --schedule-url." >&2; exit 1; }
+        echo
+        read -r -p "Enter restart schedule API URL [default: $DEFAULT_SCHEDULE_URL]: " SCHEDULE_URL
+        SCHEDULE_URL="${SCHEDULE_URL:-$DEFAULT_SCHEDULE_URL}"
+    fi
 
     if [[ ! "$SCHEDULE_URL" =~ ^https?://[^[:space:]]+$ ]]; then
         echo "Invalid URL format: $SCHEDULE_URL" >&2
@@ -492,9 +560,12 @@ prompt_schedule_url() {
 }
 
 prompt_browser_url() {
-    echo
-    read -r -p "Enter failover browser URL [default: $DEFAULT_BROWSER_URL]: " BROWSER_URL
-    BROWSER_URL="${BROWSER_URL:-$DEFAULT_BROWSER_URL}"
+    if [[ -z "$BROWSER_URL" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --browser-url." >&2; exit 1; }
+        echo
+        read -r -p "Enter failover browser URL [default: $DEFAULT_BROWSER_URL]: " BROWSER_URL
+        BROWSER_URL="${BROWSER_URL:-$DEFAULT_BROWSER_URL}"
+    fi
 
     if [[ ! "$BROWSER_URL" =~ ^https?://[^[:space:]]+$ ]]; then
         echo "Invalid URL format: $BROWSER_URL" >&2
@@ -505,26 +576,42 @@ prompt_browser_url() {
 }
 
 prompt_gpio_button() {
-    echo
-    read -r -p "Install GPIO button restart monitor? (y/N): " gpio_ans
-    if [[ "$gpio_ans" == "y" || "$gpio_ans" == "Y" ]]; then
-        INSTALL_GPIO=1
-        read -r -p "GPIO pin number [default: $DEFAULT_GPIO_PIN]: " gpio_pin_input
-        GPIO_PIN="${gpio_pin_input:-$DEFAULT_GPIO_PIN}"
+    local gpio_ans gpio_pin_input
+
+    if [[ $GPIO_SELECTION_EXPLICIT -eq 0 ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires a GPIO selection." >&2; exit 1; }
+        echo
+        read -r -p "Install GPIO button restart monitor? (y/N): " gpio_ans
+        if [[ "$gpio_ans" == "y" || "$gpio_ans" == "Y" ]]; then
+            INSTALL_GPIO=1
+        else
+            INSTALL_GPIO=0
+        fi
+    fi
+
+    if (( INSTALL_GPIO == 1 )); then
+        if [[ $GPIO_SELECTION_EXPLICIT -eq 0 ]]; then
+            read -r -p "GPIO pin number [default: $DEFAULT_GPIO_PIN]: " gpio_pin_input
+            GPIO_PIN="${gpio_pin_input:-$DEFAULT_GPIO_PIN}"
+        fi
         if [[ ! "$GPIO_PIN" =~ ^[0-9]+$ ]] || (( GPIO_PIN < 2 || GPIO_PIN > 27 )); then
             echo "Invalid GPIO pin: $GPIO_PIN (must be 2-27)" >&2
             exit 1
         fi
         echo "GPIO restart button will use pin $GPIO_PIN"
-    else
-        echo "Skipping GPIO button monitor."
+        return
     fi
+
+    echo "Skipping GPIO button monitor."
 }
 
 prompt_restart_delay_minutes() {
-    echo
-    read -r -p "Enter restart delay in minutes [default: ${DEFAULT_RESTART_DELAY_MINUTES}] (press Enter or 0 for no delay): " RESTART_DELAY_MINUTES
-    RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-$DEFAULT_RESTART_DELAY_MINUTES}"
+    if [[ -z "$RESTART_DELAY_MINUTES" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --restart-delay-minutes." >&2; exit 1; }
+        echo
+        read -r -p "Enter restart delay in minutes [default: ${DEFAULT_RESTART_DELAY_MINUTES}] (press Enter or 0 for no delay): " RESTART_DELAY_MINUTES
+        RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-$DEFAULT_RESTART_DELAY_MINUTES}"
+    fi
 
     if [[ ! "$RESTART_DELAY_MINUTES" =~ ^[0-9]+$ ]]; then
         echo "Restart delay must be a non-negative whole number of minutes." >&2
@@ -555,6 +642,19 @@ stop_service_if_running() {
     fi
 }
 
+confirm_overwrite() {
+    local path="$1"
+    local answer
+
+    [[ $ASSUME_YES -eq 1 ]] && return 0
+    if [[ $NON_INTERACTIVE -eq 1 ]]; then
+        echo "Refusing to overwrite $path without --yes." >&2
+        return 1
+    fi
+    read -r -p "Overwrite $path? (y/N): " answer
+    [[ "$answer" == "y" || "$answer" == "Y" ]]
+}
+
 write_wrapper() {
     local tmpfile
     tmpfile=$(mktemp)
@@ -576,7 +676,7 @@ THRESHOLD=5
 STARTUP_GRACE=20
 CHECK_INTERVAL=5
 VLC_LOG="/tmp/videokiosk2-vlc.log"
-MIDORI_LOG="/tmp/videokiosk2-midori.log"
+FAILOVER_LOG="/tmp/videokiosk2-failover.log"
 
 CPU_IDLE_THRESHOLD=2
 PREV_CPU=20
@@ -606,6 +706,9 @@ resolve_x11_session() {
 
     runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export XDG_RUNTIME_DIR="$runtime_dir"
+    if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -S "$runtime_dir/bus" ]]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+    fi
     [[ -n "${XAUTHORITY:-}" ]] && candidates+=("$XAUTHORITY")
     candidates+=("$HOME/.Xauthority")
 
@@ -629,37 +732,90 @@ resolve_x11_session() {
     return 1
 }
 
-midori_command() {
-    if command -v midori >/dev/null 2>&1; then
-        command -v midori
-    elif [[ -x /snap/bin/midori ]]; then
-        printf '%s\n' /snap/bin/midori
-    else
-        return 1
-    fi
+falkon_command() {
+    command -v falkon
 }
 
-launch_midori() {
-    local midori_path midori_status
-    if ! pgrep -x midori >/dev/null; then
-        if ! midori_path=$(midori_command); then
-            log "ERROR" "Midori failover is unavailable: install Midori and restart videokiosk2"
+ensure_falkon_fullscreen() {
+    local attempt window_id window_state
+
+    for attempt in {1..10}; do
+        window_id=$(xdotool search --onlyvisible --class falkon 2>/dev/null | tail -n 1)
+        if [[ -n "$window_id" ]]; then
+            window_state=$(xprop -id "$window_id" _NET_WM_STATE 2>/dev/null || true)
+            if [[ "$window_state" != *"_NET_WM_STATE_FULLSCREEN"* ]]; then
+                xdotool key --window "$window_id" F11
+            fi
+            return
+        fi
+        sleep 1
+    done
+
+    log "WARN" "Could not find a Falkon window to enter fullscreen"
+}
+
+configure_falkon_kiosk() {
+    local settings_file settings_dir temporary_file
+
+    settings_dir="${XDG_CONFIG_HOME:-$HOME/.config}/falkon/profiles/default"
+    settings_file="$settings_dir/settings.ini"
+    install -d -m 700 "$settings_dir"
+    [[ -f "$settings_file" ]] || : >"$settings_file"
+    temporary_file=$(mktemp "$settings_dir/settings.ini.XXXXXX")
+
+    awk '
+        BEGIN { in_section = 0; section_found = 0; setting_written = 0 }
+        /^\[Browser-View-Settings\]$/ {
+            in_section = 1
+            section_found = 1
+            print
+            next
+        }
+        /^\[/ {
+            if (in_section && !setting_written) {
+                print "showNavigationToolbar=false"
+                setting_written = 1
+            }
+            in_section = 0
+        }
+        in_section && /^showNavigationToolbar=/ { next }
+        { print }
+        END {
+            if (in_section && !setting_written) {
+                print "showNavigationToolbar=false"
+            } else if (!section_found) {
+                print "[Browser-View-Settings]"
+                print "showNavigationToolbar=false"
+            }
+        }
+    ' "$settings_file" 2>/dev/null >"$temporary_file"
+    mv "$temporary_file" "$settings_file"
+}
+
+launch_failover_browser() {
+    local falkon_path falkon_pid falkon_status
+    if ! pgrep -x falkon >/dev/null; then
+        if ! falkon_path=$(falkon_command); then
+            log "ERROR" "Failover browser is unavailable: install falkon and restart videokiosk2"
             return 1
         fi
-        log "INFO" "Launching Midori failover browser with X11 backend"
-        : >"$MIDORI_LOG"
-        env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
-            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$MIDORI_LOG" 2>&1
-        midori_status=$?
-        if (( midori_status != 0 )); then
-            if [[ "$midori_path" == /snap/bin/* ]] && command -v snap >/dev/null 2>&1; then
-                snap logs midori -n=50 >>"$MIDORI_LOG" 2>&1 || true
-            fi
-            log "ERROR" "Midori exited with status $midori_status; see $MIDORI_LOG"
+        configure_falkon_kiosk
+        log "INFO" "Launching Falkon failover browser with X11 backend"
+        : >"$FAILOVER_LOG"
+        env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb "$falkon_path" \
+            --private-browsing \
+            --no-extensions \
+            --fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1 &
+        falkon_pid=$!
+        ensure_falkon_fullscreen
+        wait "$falkon_pid"
+        falkon_status=$?
+        if (( falkon_status != 0 )); then
+            log "ERROR" "Falkon exited with status $falkon_status; see $FAILOVER_LOG"
             return 1
         fi
     else
-        log "INFO" "Midori already running"
+        log "INFO" "Falkon failover browser already running"
     fi
 }
 
@@ -705,7 +861,6 @@ start_vlc() {
         --no-interact \
         --no-qt-error-dialogs \
         --no-qt-privacy-ask \
-        --no-qt-updates-notif \
         --no-qt-system-tray \
         --qt-notification=0 \
         --quiet \
@@ -735,7 +890,7 @@ sleep 5
 
 if ! vlc_running; then
     log "ERROR" "VLC failed to start; see $VLC_LOG"
-    launch_midori
+    launch_failover_browser
     mark_midori_start
     exit 0
 fi
@@ -789,7 +944,7 @@ while vlc_running; do
     if (( FREEZE_COUNT >= THRESHOLD && CPU_LOW_COUNT >= THRESHOLD )); then
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
-        launch_midori
+        launch_failover_browser
         mark_midori_start
         exit 0
     fi
@@ -797,7 +952,7 @@ while vlc_running; do
     if (( CPU_ZERO_COUNT >= THRESHOLD )); then
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
-        launch_midori
+        launch_failover_browser
         mark_midori_start
         exit 0
     fi
@@ -805,8 +960,8 @@ while vlc_running; do
     sleep "$CHECK_INTERVAL"
 done
 
-log "WARN" "VLC exited unexpectedly. Launching Midori."
-launch_midori
+log "WARN" "VLC exited unexpectedly. Launching failover browser."
+launch_failover_browser
 mark_midori_start
 exit 0
 EOF
@@ -823,8 +978,7 @@ EOF
         echo
         echo "Existing $WRAPPER_PATH found. Showing diff:"
         diff -u "$WRAPPER_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $WRAPPER_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$WRAPPER_PATH"; then
             echo "Keeping existing wrapper."
             rm -f "$tmpfile"
             return
@@ -858,8 +1012,7 @@ LOCALEOF
         echo
         echo "Existing $conf_path found. Showing diff:"
         diff -u "$conf_path" "$tmpfile" || true
-        read -r -p "Overwrite $conf_path? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$conf_path"; then
             echo "Keeping existing local.conf."
             rm -f "$tmpfile"
             return
@@ -1081,8 +1234,7 @@ EOF
         echo
         echo "Existing $SCHEDULER_SCRIPT_PATH found. Showing diff:"
         diff -u "$SCHEDULER_SCRIPT_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $SCHEDULER_SCRIPT_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$SCHEDULER_SCRIPT_PATH"; then
             echo "Keeping existing scheduler script."
             rm -f "$tmpfile"
             return
@@ -1117,13 +1269,12 @@ KillSignal=SIGTERM
 SendSIGKILL=yes
 TimeoutStopSec=5
 
-ExecStop=/usr/bin/pkill -TERM -f vlc-wrapper.sh
-ExecStopPost=/usr/bin/pkill -TERM vlc
-ExecStopPost=/usr/bin/pkill -TERM midori
+ExecStop=-/usr/bin/pkill -TERM -f vlc-wrapper.sh
+ExecStopPost=-/usr/bin/pkill -TERM vlc
+ExecStopPost=-/usr/bin/pkill -TERM falkon
 
 User=$KIOSK_USER
 Environment=DISPLAY=$X_DISPLAY
-Environment=XAUTHORITY=$XAUTHORITY_PATH
 Environment=XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR_PATH
 
 [Install]
@@ -1139,8 +1290,7 @@ EOF
         echo
         echo "Existing $SERVICE_PATH found. Showing diff:"
         diff -u "$SERVICE_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $SERVICE_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$SERVICE_PATH"; then
             echo "Keeping existing service file."
             rm -f "$tmpfile"
             return
@@ -1185,8 +1335,7 @@ EOF
         echo
         echo "Existing $SCHEDULER_SERVICE_PATH found. Showing diff:"
         diff -u "$SCHEDULER_SERVICE_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $SCHEDULER_SERVICE_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$SCHEDULER_SERVICE_PATH"; then
             echo "Keeping existing scheduler service file."
             rm -f "$tmpfile"
             return
@@ -1261,8 +1410,7 @@ GPIOEOF
         echo
         echo "Existing $GPIO_SCRIPT_PATH found. Showing diff:"
         diff -u "$GPIO_SCRIPT_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $GPIO_SCRIPT_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$GPIO_SCRIPT_PATH"; then
             echo "Keeping existing GPIO restart script."
             rm -f "$tmpfile"
             return
@@ -1306,8 +1454,7 @@ EOF
         echo
         echo "Existing $GPIO_SERVICE_PATH found. Showing diff:"
         diff -u "$GPIO_SERVICE_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $GPIO_SERVICE_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$GPIO_SERVICE_PATH"; then
             echo "Keeping existing GPIO service file."
             rm -f "$tmpfile"
             return
@@ -1339,8 +1486,7 @@ SUDOERSEOF
         echo
         echo "Existing $GPIO_SUDOERS_PATH found. Showing diff:"
         diff -u "$GPIO_SUDOERS_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $GPIO_SUDOERS_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$GPIO_SUDOERS_PATH"; then
             echo "Keeping existing sudoers rule."
             rm -f "$tmpfile"
             return

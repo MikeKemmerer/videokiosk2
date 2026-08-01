@@ -5,7 +5,7 @@ A kiosk-mode video display system for Raspberry Pi. Plays an HLS/MPEG-TS video s
 ## Features
 
 - VLC fullscreen playback with freeze and CPU-stall detection
-- Automatic failover to Midori browser when stream is down
+- Automatic failover to Falkon browser when stream is down
 - Scheduled service restarts via an external API
 - Configurable restart delay with schedule-supersede logic
 - Systemd service integration
@@ -37,18 +37,20 @@ The installer will prompt for:
 - **Schedule API URL** — endpoint providing restart trigger timing
 - **Restart delay** — minutes to wait before acting on a restart trigger
 
-On a graphical Ubuntu host, the installer checks the active desktop's Xauthority
-files and records the one that can access the configured display. This avoids
-assuming that `~/.Xauthority` is valid for a Wayland/Xwayland desktop. Override
-the detected file only when needed with `--xauthority /path/to/Xauthority`.
+The generated wrapper discovers a usable Xauthority file each time it starts,
+so it does not rely on a stale path after a graphical-session restart. On a
+newly provisioned Debian kiosk, no active X11 authority exists until LightDM
+starts the first graphical session after reboot. Override discovery only when
+needed with `--xauthority /path/to/Xauthority`.
 
 ### Prerequisites
 
 The installer checks for the executable each feature needs before asking APT to
-install a package. This allows an Ubuntu host to use a browser installed by a
-different package manager; Midori is accepted from either `PATH` or
-`/snap/bin/midori`. If a prerequisite remains unavailable, the installer
-lists it at the end so it can be installed manually before retrying.
+install a package. The failover browser is Ubuntu's native `falkon` package,
+which runs from the kiosk's system service without Snap desktop authorization.
+The installer also uses `xdotool` to confirm Falkon is fullscreen after it
+opens. If a prerequisite remains unavailable, the installer lists it at the
+end so it can be installed manually before retrying.
 
 On Ubuntu, the generated kiosk, scheduler, and optional GPIO services use a
 `videokiosk2` AppArmor profile. It starts in complain mode so a display is not
@@ -59,12 +61,17 @@ profile: `sudo aa-enforce /etc/apparmor.d/videokiosk2`.
 ## How It Works
 
 1. `vlc-wrapper.sh` starts VLC in fullscreen and monitors for frozen frames (via screen-capture hashing) and low/zero CPU usage.
-2. If the stream appears frozen or VLC stops decoding, VLC is killed and Midori opens as a failover.
+2. If the stream appears frozen or VLC stops decoding, VLC is killed and Falkon opens in fullscreen as a failover.
+	Falkon uses a private, extension-free session for each failover, so it does
+	not restore or accumulate previous tabs.
 3. A companion scheduler script polls a REST API for scheduled restarts (e.g., before a live stream begins) and restarts the systemd service on cue.
 
 ## Configuration
 
-All configuration is set at install time via interactive prompts. The installer writes the final values into the generated scripts. Run the installer again to change settings.
+Configuration can be supplied interactively or with `--feed-url`,
+`--browser-url`, `--schedule-url`, `--restart-delay-minutes`, and GPIO flags.
+The installer writes the final values into generated scripts. Run it again to
+change settings.
 
 ## License
 
