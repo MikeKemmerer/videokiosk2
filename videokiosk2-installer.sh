@@ -1269,12 +1269,13 @@ KillSignal=SIGTERM
 SendSIGKILL=yes
 TimeoutStopSec=5
 
-ExecStop=-/usr/bin/pkill -TERM -f vlc-wrapper.sh
+ExecStop=/usr/bin/pkill -TERM -f vlc-wrapper.sh
 ExecStopPost=-/usr/bin/pkill -TERM vlc
 ExecStopPost=-/usr/bin/pkill -TERM falkon
 
 User=$KIOSK_USER
 Environment=DISPLAY=$X_DISPLAY
+Environment=XAUTHORITY=$XAUTHORITY_PATH
 Environment=XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR_PATH
 
 [Install]
