@@ -5,7 +5,7 @@ A kiosk-mode video display system for Raspberry Pi. Plays an HLS/MPEG-TS video s
 ## Features
 
 - VLC fullscreen playback with freeze and CPU-stall detection
-- Automatic failover to Falkon browser when stream is down
+- Automatic failover to Midori on Raspberry Pi OS and Falkon on other installs
 - Scheduled service restarts via an external API
 - Configurable restart delay with schedule-supersede logic
 - Systemd service integration
@@ -46,11 +46,12 @@ needed with `--xauthority /path/to/Xauthority`.
 ### Prerequisites
 
 The installer checks for the executable each feature needs before asking APT to
-install a package. The failover browser is Ubuntu's native `falkon` package,
-which runs from the kiosk's system service without Snap desktop authorization.
-The installer also uses `xdotool` to confirm Falkon is fullscreen after it
-opens. If a prerequisite remains unavailable, the installer lists it at the
-end so it can be installed manually before retrying.
+install a package. Raspberry Pi OS keeps the existing Midori failover path.
+Other installs use Debian/Ubuntu's native `falkon` package, which runs from
+the kiosk's system service without Snap desktop authorization. The installer
+also uses `xdotool` to confirm Falkon is fullscreen after it opens. If a
+prerequisite remains unavailable, the installer lists it at the end so it can
+be installed manually before retrying.
 
 On Ubuntu, the generated kiosk, scheduler, and optional GPIO services use a
 `videokiosk2` AppArmor profile. It starts in complain mode so a display is not
@@ -61,17 +62,19 @@ profile: `sudo aa-enforce /etc/apparmor.d/videokiosk2`.
 ## How It Works
 
 1. `vlc-wrapper.sh` starts VLC in fullscreen and monitors for frozen frames (via screen-capture hashing) and low/zero CPU usage.
-2. If the stream appears frozen or VLC stops decoding, VLC is killed and Falkon opens in fullscreen as a failover.
-	Falkon uses a private, extension-free session for each failover, so it does
-	not restore or accumulate previous tabs.
+2. If the stream appears frozen or VLC stops decoding, VLC is killed and the
+	failover browser opens in fullscreen. Raspberry Pi OS uses Midori; other
+	installs use Falkon. Falkon uses a private, extension-free session for each
+	failover, so it does not restore or accumulate previous tabs.
 3. A companion scheduler script polls a REST API for scheduled restarts (e.g., before a live stream begins) and restarts the systemd service on cue.
 
 ## Configuration
 
 Configuration can be supplied interactively or with `--feed-url`,
 `--browser-url`, `--schedule-url`, `--restart-delay-minutes`, and GPIO flags.
-The installer writes the final values into generated scripts. Run it again to
-change settings.
+The installer writes the final values into generated scripts. `local.conf` can
+also set `FAILOVER_BROWSER` when you need to override the OS-based default.
+Run it again to change settings.
 
 ## License
 

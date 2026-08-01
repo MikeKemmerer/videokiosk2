@@ -41,6 +41,7 @@ FEED_URL="${FEED_URL:-}"
 BROWSER_URL="${BROWSER_URL:-}"
 SCHEDULE_URL="${SCHEDULE_URL:-}"
 RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-}"
+FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
 NON_INTERACTIVE=0
 ASSUME_YES=0
 GPIO_SELECTION_EXPLICIT=0
@@ -285,6 +286,7 @@ load_existing_config() {
         # Strip trailing \r in case the file has Windows line endings
         STREAM_URL="${STREAM_URL%$'\r'}"
         BROWSER_URL="${BROWSER_URL%$'\r'}"
+        FAILOVER_BROWSER="${FAILOVER_BROWSER%$'\r'}"
         [[ -n "${STREAM_URL:-}" ]] && DEFAULT_URL="$STREAM_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_BROWSER_URL="$BROWSER_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_SCHEDULE_URL="${BROWSER_URL}/api/service-restart-schedule"
@@ -303,6 +305,41 @@ is_ubuntu() {
     # shellcheck disable=SC1091
     source "$OS_RELEASE_FILE"
     [[ "${ID:-}" == "ubuntu" ]]
+}
+
+is_raspberry_pi_os() {
+    local os_name pretty_name id_like
+
+    [[ -r "$OS_RELEASE_FILE" ]] || return 1
+    # shellcheck disable=SC1091
+    source "$OS_RELEASE_FILE"
+
+    [[ "${ID:-}" == "raspbian" ]] && return 0
+
+    id_like="${ID_LIKE:-}"
+    [[ "$id_like" == *raspbian* ]] && return 0
+
+    os_name="${NAME:-}"
+    pretty_name="${PRETTY_NAME:-}"
+    [[ "$os_name" == *"Raspberry Pi OS"* || "$pretty_name" == *"Raspberry Pi OS"* ]]
+}
+
+resolve_failover_browser() {
+    if [[ -n "$FAILOVER_BROWSER" ]]; then
+        case "$FAILOVER_BROWSER" in
+            midori|falkon) return ;;
+            *)
+                echo "FAILOVER_BROWSER must be 'midori' or 'falkon'." >&2
+                exit 1
+                ;;
+        esac
+    fi
+
+    if is_raspberry_pi_os; then
+        FAILOVER_BROWSER="midori"
+    else
+        FAILOVER_BROWSER="falkon"
+    fi
 }
 
 is_apparmor_safe_path() {
@@ -426,6 +463,15 @@ command_for_prerequisite() {
     local prerequisite="$1"
 
     case "$prerequisite" in
+        midori)
+            if command -v midori >/dev/null 2>&1; then
+                command -v midori
+            elif [[ -x /snap/bin/midori ]]; then
+                printf '%s\n' /snap/bin/midori
+            else
+                return 1
+            fi
+            ;;
         falkon) command -v falkon ;;
         x11-apps) command -v xwd ;;
         x11-xserver-utils) command -v xset ;;
@@ -444,6 +490,9 @@ report_unavailable_prerequisites() {
     echo "The following prerequisites are still unavailable:"
     for prerequisite in "${unavailable[@]}"; do
         case "$prerequisite" in
+            midori)
+                echo "  - Midori browser (normally provided by midori)"
+                ;;
             falkon)
                 echo "  - Falkon browser (normally provided by falkon)"
                 ;;
@@ -471,7 +520,10 @@ report_unavailable_prerequisites() {
 }
 
 install_packages() {
-    local required=(vlc falkon x11-apps x11-xserver-utils xdotool curl python3 cec-utils)
+    local required=(vlc "$FAILOVER_BROWSER" x11-apps x11-xserver-utils curl python3 cec-utils)
+    if [[ "$FAILOVER_BROWSER" == "falkon" ]]; then
+        required+=(xdotool)
+    fi
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
     fi
@@ -664,6 +716,7 @@ write_wrapper() {
 
 STREAM_URL="http://your-stream-server:8086/2.ts"
 BROWSER_URL="http://your-calendar-server:8000"
+FAILOVER_BROWSER="__FAILOVER_BROWSER__"
 
 # Source local overrides if present (created by installer or manually)
 CONFIG_PATH="__CONFIG_PATH__"
@@ -732,6 +785,44 @@ resolve_x11_session() {
     return 1
 }
 
+detect_failover_browser() {
+    local os_name pretty_name id_like
+
+    if [[ -n "${FAILOVER_BROWSER:-}" ]]; then
+        case "$FAILOVER_BROWSER" in
+            midori|falkon) return ;;
+            *)
+                log "WARN" "Unknown FAILOVER_BROWSER '$FAILOVER_BROWSER'; falling back to OS detection"
+                FAILOVER_BROWSER=""
+                ;;
+        esac
+    fi
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        source /etc/os-release
+        [[ "${ID:-}" == "raspbian" ]] && FAILOVER_BROWSER="midori"
+        id_like="${ID_LIKE:-}"
+        os_name="${NAME:-}"
+        pretty_name="${PRETTY_NAME:-}"
+        if [[ -z "${FAILOVER_BROWSER:-}" ]] && [[ "$id_like" == *raspbian* || "$os_name" == *"Raspberry Pi OS"* || "$pretty_name" == *"Raspberry Pi OS"* ]]; then
+            FAILOVER_BROWSER="midori"
+        fi
+    fi
+
+    FAILOVER_BROWSER="${FAILOVER_BROWSER:-falkon}"
+}
+
+midori_command() {
+    if command -v midori >/dev/null 2>&1; then
+        command -v midori
+    elif [[ -x /snap/bin/midori ]]; then
+        printf '%s\n' /snap/bin/midori
+    else
+        return 1
+    fi
+}
+
 falkon_command() {
     command -v falkon
 }
@@ -792,7 +883,38 @@ configure_falkon_kiosk() {
     mv "$temporary_file" "$settings_file"
 }
 
+launch_midori() {
+    local midori_path midori_status
+    if ! pgrep -x midori >/dev/null; then
+        if ! midori_path=$(midori_command); then
+            log "ERROR" "Failover browser is unavailable: install midori and restart videokiosk2"
+            return 1
+        fi
+        log "INFO" "Launching Midori failover browser with X11 backend"
+        : >"$FAILOVER_LOG"
+        env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
+            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1
+        midori_status=$?
+        if (( midori_status != 0 )); then
+            if [[ "$midori_path" == /snap/bin/* ]] && command -v snap >/dev/null 2>&1; then
+                snap logs midori -n=50 >>"$FAILOVER_LOG" 2>&1 || true
+            fi
+            log "ERROR" "Midori exited with status $midori_status; see $FAILOVER_LOG"
+            return 1
+        fi
+    else
+        log "INFO" "Midori already running"
+    fi
+}
+
 launch_failover_browser() {
+    detect_failover_browser
+
+    if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
+        launch_midori
+        return
+    fi
+
     local falkon_path falkon_pid falkon_status
     if ! pgrep -x falkon >/dev/null; then
         if ! falkon_path=$(falkon_command); then
@@ -967,6 +1089,7 @@ exit 0
 EOF
 
     sed -i "s|__CONFIG_PATH__|$CONFIG_PATH|g" "$tmpfile"
+    sed -i "s|__FAILOVER_BROWSER__|$FAILOVER_BROWSER|g" "$tmpfile"
     sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
 
     if [[ -f "$WRAPPER_PATH" ]]; then
@@ -1001,6 +1124,7 @@ write_local_conf() {
 # videokiosk2 local configuration — generated by installer
 STREAM_URL="$FEED_URL"
 BROWSER_URL="$BROWSER_URL"
+FAILOVER_BROWSER="$FAILOVER_BROWSER"
 LOCALEOF
 
     if [[ -f "$conf_path" ]]; then
@@ -1271,7 +1395,7 @@ TimeoutStopSec=5
 
 ExecStop=/usr/bin/pkill -TERM -f vlc-wrapper.sh
 ExecStopPost=-/usr/bin/pkill -TERM vlc
-ExecStopPost=-/usr/bin/pkill -TERM falkon
+ExecStopPost=-/usr/bin/pkill -TERM $FAILOVER_BROWSER
 
 User=$KIOSK_USER
 Environment=DISPLAY=$X_DISPLAY
@@ -1529,6 +1653,7 @@ main() {
         return
     fi
     resolve_kiosk_user
+    resolve_failover_browser
     prepare_directories
     load_existing_config
     prompt_url

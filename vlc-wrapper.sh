@@ -2,6 +2,7 @@
 
 STREAM_URL="http://your-stream-server:8086/0.ts"
 BROWSER_URL="http://your-calendar-server:8000"
+FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
 
 # Source generated configuration, retaining the legacy adjacent config fallback
 # for manually run copies of this wrapper.
@@ -73,6 +74,44 @@ resolve_x11_session() {
     return 1
 }
 
+detect_failover_browser() {
+    local os_name pretty_name id_like
+
+    if [[ -n "${FAILOVER_BROWSER:-}" ]]; then
+        case "$FAILOVER_BROWSER" in
+            midori|falkon) return ;;
+            *)
+                log "WARN" "Unknown FAILOVER_BROWSER '$FAILOVER_BROWSER'; falling back to OS detection"
+                FAILOVER_BROWSER=""
+                ;;
+        esac
+    fi
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        source /etc/os-release
+        [[ "${ID:-}" == "raspbian" ]] && FAILOVER_BROWSER="midori"
+        id_like="${ID_LIKE:-}"
+        os_name="${NAME:-}"
+        pretty_name="${PRETTY_NAME:-}"
+        if [[ -z "${FAILOVER_BROWSER:-}" ]] && [[ "$id_like" == *raspbian* || "$os_name" == *"Raspberry Pi OS"* || "$pretty_name" == *"Raspberry Pi OS"* ]]; then
+            FAILOVER_BROWSER="midori"
+        fi
+    fi
+
+    FAILOVER_BROWSER="${FAILOVER_BROWSER:-falkon}"
+}
+
+midori_command() {
+    if command -v midori >/dev/null 2>&1; then
+        command -v midori
+    elif [[ -x /snap/bin/midori ]]; then
+        printf '%s\n' /snap/bin/midori
+    else
+        return 1
+    fi
+}
+
 falkon_command() {
     command -v falkon
 }
@@ -133,7 +172,38 @@ configure_falkon_kiosk() {
     mv "$temporary_file" "$settings_file"
 }
 
+launch_midori() {
+    local midori_path midori_status
+    if ! pgrep -x midori >/dev/null; then
+        if ! midori_path=$(midori_command); then
+            log "ERROR" "Failover browser is unavailable: install midori and restart videokiosk2"
+            return 1
+        fi
+        log "INFO" "Launching Midori failover browser with X11 backend"
+        : >"$FAILOVER_LOG"
+        env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
+            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1
+        midori_status=$?
+        if (( midori_status != 0 )); then
+            if [[ "$midori_path" == /snap/bin/* ]] && command -v snap >/dev/null 2>&1; then
+                snap logs midori -n=50 >>"$FAILOVER_LOG" 2>&1 || true
+            fi
+            log "ERROR" "Midori exited with status $midori_status; see $FAILOVER_LOG"
+            return 1
+        fi
+    else
+        log "INFO" "Midori already running"
+    fi
+}
+
 launch_failover_browser() {
+    detect_failover_browser
+
+    if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
+        launch_midori
+        return
+    fi
+
     local falkon_path falkon_pid falkon_status
     if ! pgrep -x falkon >/dev/null; then
         if ! falkon_path=$(falkon_command); then
