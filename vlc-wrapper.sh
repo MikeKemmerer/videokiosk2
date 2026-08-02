@@ -3,6 +3,7 @@
 STREAM_URL="http://your-stream-server:8086/0.ts"
 BROWSER_URL="http://your-calendar-server:8000"
 FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
+BROWSER_SCALE="${BROWSER_SCALE:-1}"
 AUDIO_OUTPUT="${AUDIO_OUTPUT:-auto}"
 ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
 
@@ -124,6 +125,16 @@ falkon_command() {
     command -v falkon
 }
 
+validate_falkon_scale() {
+    case "$BROWSER_SCALE" in
+        1|1.25|1.5|1.75|2) ;;
+        *)
+            log "WARN" "Invalid BROWSER_SCALE '$BROWSER_SCALE'; using 1"
+            BROWSER_SCALE=1
+            ;;
+    esac
+}
+
 ensure_falkon_fullscreen() {
     local attempt window_id window_state
 
@@ -224,9 +235,10 @@ launch_failover_browser() {
             return 1
         fi
         configure_falkon_kiosk
-        log "INFO" "Launching Falkon failover browser with X11 backend"
+        validate_falkon_scale
+        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
         : >"$FAILOVER_LOG"
-        env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb "$falkon_path" \
+        env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR="$BROWSER_SCALE" "$falkon_path" \
             --private-browsing \
             --no-extensions \
             --fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1 &

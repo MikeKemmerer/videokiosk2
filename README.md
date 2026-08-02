@@ -74,6 +74,10 @@ Configuration can be supplied interactively or with `--feed-url`,
 `--browser-url`, `--schedule-url`, `--restart-delay-minutes`, and GPIO flags.
 The installer writes the final values into generated scripts. `local.conf` can
 also set `FAILOVER_BROWSER` when you need to override the OS-based default.
+For a 1080p Falkon kiosk displaying a 720p-oriented page, set
+`BROWSER_SCALE="1.5"` in `local.conf` (or pass `--browser-scale 1.5` to the
+installer). The scale is applied through Qt only when Falkon launches; Midori
+continues at its native scale.
 Use `--audio-output alsa --alsa-audio-device DEVICE` to make VLC use a specific
 ALSA device, such as `hdmi:CARD=PCH,DEV=0`; `--audio-output auto` retains VLC's
 normal output selection. Before choosing a device, list the host's identifiers:

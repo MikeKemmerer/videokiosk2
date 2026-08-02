@@ -42,6 +42,8 @@ BROWSER_URL="${BROWSER_URL:-}"
 SCHEDULE_URL="${SCHEDULE_URL:-}"
 RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-}"
 FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
+BROWSER_SCALE="${BROWSER_SCALE:-}"
+BROWSER_SCALE_OPTION=""
 AUDIO_OUTPUT="${AUDIO_OUTPUT:-}"
 AUDIO_OUTPUT_OPTION=""
 ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
@@ -62,6 +64,7 @@ Options:
     --xauthority PATH   Xauthority file for the kiosk user (auto-detected by default).
     --feed-url URL       Video feed URL.
     --browser-url URL    Failover browser URL.
+    --browser-scale SCALE  Falkon UI scale: 1, 1.25, 1.5, 1.75, or 2 (default: 1).
     --schedule-url URL   Restart schedule API URL.
     --restart-delay-minutes MINUTES  Delay scheduled restarts by this many minutes.
     --audio-output MODE   Select auto or alsa audio output (default: auto).
@@ -114,6 +117,11 @@ parse_arguments() {
             --browser-url)
                 BROWSER_URL="${2:-}"
                 [[ -n "$BROWSER_URL" ]] || { echo "--browser-url requires a URL." >&2; exit 1; }
+                shift 2
+                ;;
+            --browser-scale)
+                BROWSER_SCALE_OPTION="${2:-}"
+                [[ -n "$BROWSER_SCALE_OPTION" ]] || { echo "--browser-scale requires a scale." >&2; exit 1; }
                 shift 2
                 ;;
             --schedule-url)
@@ -304,6 +312,7 @@ load_existing_config() {
         STREAM_URL="${STREAM_URL%$'\r'}"
         BROWSER_URL="${BROWSER_URL%$'\r'}"
         FAILOVER_BROWSER="${FAILOVER_BROWSER%$'\r'}"
+        BROWSER_SCALE="${BROWSER_SCALE%$'\r'}"
         AUDIO_OUTPUT="${AUDIO_OUTPUT%$'\r'}"
         ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE%$'\r'}"
         [[ -n "${STREAM_URL:-}" ]] && DEFAULT_URL="$STREAM_URL"
@@ -358,6 +367,26 @@ resolve_failover_browser() {
         FAILOVER_BROWSER="midori"
     else
         FAILOVER_BROWSER="falkon"
+    fi
+}
+
+resolve_browser_scale() {
+    if [[ -n "$BROWSER_SCALE_OPTION" ]]; then
+        BROWSER_SCALE="$BROWSER_SCALE_OPTION"
+    fi
+    BROWSER_SCALE="${BROWSER_SCALE:-1}"
+
+    case "$BROWSER_SCALE" in
+        1|1.25|1.5|1.75|2) ;;
+        *)
+            echo "BROWSER_SCALE must be 1, 1.25, 1.5, 1.75, or 2." >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ "$FAILOVER_BROWSER" == "midori" && "$BROWSER_SCALE" != "1" ]]; then
+        echo "BROWSER_SCALE is supported only by the Falkon failover browser." >&2
+        exit 1
     fi
 }
 
@@ -789,6 +818,7 @@ write_wrapper() {
 STREAM_URL="http://your-stream-server:8086/2.ts"
 BROWSER_URL="http://your-calendar-server:8000"
 FAILOVER_BROWSER="__FAILOVER_BROWSER__"
+BROWSER_SCALE="__BROWSER_SCALE__"
 AUDIO_OUTPUT="__AUDIO_OUTPUT__"
 ALSA_AUDIO_DEVICE="__ALSA_AUDIO_DEVICE__"
 
@@ -891,6 +921,7 @@ detect_failover_browser() {
     fi
 
     FAILOVER_BROWSER="${FAILOVER_BROWSER:-falkon}"
+    BROWSER_SCALE="${BROWSER_SCALE:-1}"
 }
 
 midori_command() {
@@ -905,6 +936,16 @@ midori_command() {
 
 falkon_command() {
     command -v falkon
+}
+
+validate_falkon_scale() {
+    case "$BROWSER_SCALE" in
+        1|1.25|1.5|1.75|2) ;;
+        *)
+            log "WARN" "Invalid BROWSER_SCALE '$BROWSER_SCALE'; using 1"
+            BROWSER_SCALE=1
+            ;;
+    esac
 }
 
 ensure_falkon_fullscreen() {
@@ -1007,9 +1048,10 @@ launch_failover_browser() {
             return 1
         fi
         configure_falkon_kiosk
-        log "INFO" "Launching Falkon failover browser with X11 backend"
+        validate_falkon_scale
+        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
         : >"$FAILOVER_LOG"
-        env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb "$falkon_path" \
+        env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR="$BROWSER_SCALE" "$falkon_path" \
             --private-browsing \
             --no-extensions \
             --fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1 &
@@ -1186,6 +1228,7 @@ EOF
 
     sed -i "s|__CONFIG_PATH__|$CONFIG_PATH|g" "$tmpfile"
     sed -i "s|__FAILOVER_BROWSER__|$FAILOVER_BROWSER|g" "$tmpfile"
+    sed -i "s|__BROWSER_SCALE__|$BROWSER_SCALE|g" "$tmpfile"
     sed -i "s|__AUDIO_OUTPUT__|$AUDIO_OUTPUT|g" "$tmpfile"
     sed -i "s|__ALSA_AUDIO_DEVICE__|$ALSA_AUDIO_DEVICE|g" "$tmpfile"
     sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
@@ -1223,6 +1266,7 @@ write_local_conf() {
 STREAM_URL="$FEED_URL"
 BROWSER_URL="$BROWSER_URL"
 FAILOVER_BROWSER="$FAILOVER_BROWSER"
+BROWSER_SCALE="$BROWSER_SCALE"
 AUDIO_OUTPUT="$AUDIO_OUTPUT"
 ALSA_AUDIO_DEVICE="$ALSA_AUDIO_DEVICE"
 LOCALEOF
@@ -1760,9 +1804,10 @@ main() {
         return
     fi
     resolve_kiosk_user
-    resolve_failover_browser
-    prepare_directories
     load_existing_config
+    resolve_failover_browser
+    resolve_browser_scale
+    prepare_directories
     resolve_audio_output
     prompt_url
     prompt_browser_url
