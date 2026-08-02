@@ -3,6 +3,8 @@
 STREAM_URL="http://your-stream-server:8086/0.ts"
 BROWSER_URL="http://your-calendar-server:8000"
 FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
+AUDIO_OUTPUT="${AUDIO_OUTPUT:-auto}"
+ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
 
 # Source generated configuration, retaining the legacy adjacent config fallback
 # for manually run copies of this wrapper.
@@ -242,9 +244,19 @@ launch_failover_browser() {
 }
 
 start_vlc() {
+    local -a audio_arguments=()
+
+    if [[ "$AUDIO_OUTPUT" == "alsa" ]]; then
+        if [[ -z "$ALSA_AUDIO_DEVICE" ]]; then
+            log "WARN" "ALSA audio output selected without a device; using VLC default"
+        else
+            audio_arguments=(--aout=alsa --alsa-audio-device="$ALSA_AUDIO_DEVICE")
+            log "INFO" "Using VLC ALSA audio device: $ALSA_AUDIO_DEVICE"
+        fi
+    fi
     log "INFO" "Starting VLC with URL: $STREAM_URL"
 
-    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" \
+    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" "${audio_arguments[@]}" \
         --no-video-title-show \
         --no-interact \
         --no-qt-error-dialogs \

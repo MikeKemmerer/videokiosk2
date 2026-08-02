@@ -42,6 +42,10 @@ BROWSER_URL="${BROWSER_URL:-}"
 SCHEDULE_URL="${SCHEDULE_URL:-}"
 RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-}"
 FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
+AUDIO_OUTPUT="${AUDIO_OUTPUT:-}"
+AUDIO_OUTPUT_OPTION=""
+ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
+ALSA_AUDIO_DEVICE_OPTION=""
 NON_INTERACTIVE=0
 ASSUME_YES=0
 GPIO_SELECTION_EXPLICIT=0
@@ -60,6 +64,8 @@ Options:
     --browser-url URL    Failover browser URL.
     --schedule-url URL   Restart schedule API URL.
     --restart-delay-minutes MINUTES  Delay scheduled restarts by this many minutes.
+    --audio-output MODE   Select auto or alsa audio output (default: auto).
+    --alsa-audio-device DEVICE  ALSA device used with --audio-output alsa.
     --enable-gpio-restart  Install the GPIO restart button monitor.
     --disable-gpio-restart Do not install the GPIO restart button monitor.
     --gpio-pin PIN       GPIO pin for the restart button (also enables it).
@@ -117,6 +123,16 @@ parse_arguments() {
             --restart-delay-minutes)
                 RESTART_DELAY_MINUTES="${2:-}"
                 [[ -n "$RESTART_DELAY_MINUTES" ]] || { echo "--restart-delay-minutes requires minutes." >&2; exit 1; }
+                shift 2
+                ;;
+            --audio-output)
+                AUDIO_OUTPUT_OPTION="${2:-}"
+                [[ -n "$AUDIO_OUTPUT_OPTION" ]] || { echo "--audio-output requires auto or alsa." >&2; exit 1; }
+                shift 2
+                ;;
+            --alsa-audio-device)
+                ALSA_AUDIO_DEVICE_OPTION="${2:-}"
+                [[ -n "$ALSA_AUDIO_DEVICE_OPTION" ]] || { echo "--alsa-audio-device requires a device." >&2; exit 1; }
                 shift 2
                 ;;
             --enable-gpio-restart)
@@ -287,6 +303,8 @@ load_existing_config() {
         STREAM_URL="${STREAM_URL%$'\r'}"
         BROWSER_URL="${BROWSER_URL%$'\r'}"
         FAILOVER_BROWSER="${FAILOVER_BROWSER%$'\r'}"
+        AUDIO_OUTPUT="${AUDIO_OUTPUT%$'\r'}"
+        ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE%$'\r'}"
         [[ -n "${STREAM_URL:-}" ]] && DEFAULT_URL="$STREAM_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_BROWSER_URL="$BROWSER_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_SCHEDULE_URL="${BROWSER_URL}/api/service-restart-schedule"
@@ -340,6 +358,34 @@ resolve_failover_browser() {
     else
         FAILOVER_BROWSER="falkon"
     fi
+}
+
+resolve_audio_output() {
+    if [[ -n "$AUDIO_OUTPUT_OPTION" ]]; then
+        AUDIO_OUTPUT="$AUDIO_OUTPUT_OPTION"
+    fi
+    if [[ -n "$ALSA_AUDIO_DEVICE_OPTION" ]]; then
+        ALSA_AUDIO_DEVICE="$ALSA_AUDIO_DEVICE_OPTION"
+    fi
+    AUDIO_OUTPUT="${AUDIO_OUTPUT:-auto}"
+
+    case "$AUDIO_OUTPUT" in
+        auto) ;;
+        alsa)
+            if [[ -z "$ALSA_AUDIO_DEVICE" ]]; then
+                if [[ $NON_INTERACTIVE -eq 1 ]]; then
+                    echo "--non-interactive --audio-output alsa requires --alsa-audio-device." >&2
+                    exit 1
+                fi
+                read -r -p "ALSA audio device [default: hdmi:CARD=PCH,DEV=0]: " ALSA_AUDIO_DEVICE
+                ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-hdmi:CARD=PCH,DEV=0}"
+            fi
+            ;;
+        *)
+            echo "AUDIO_OUTPUT must be 'auto' or 'alsa'." >&2
+            exit 1
+            ;;
+    esac
 }
 
 is_apparmor_safe_path() {
@@ -721,6 +767,8 @@ write_wrapper() {
 STREAM_URL="http://your-stream-server:8086/2.ts"
 BROWSER_URL="http://your-calendar-server:8000"
 FAILOVER_BROWSER="__FAILOVER_BROWSER__"
+AUDIO_OUTPUT="__AUDIO_OUTPUT__"
+ALSA_AUDIO_DEVICE="__ALSA_AUDIO_DEVICE__"
 
 # Source local overrides if present (created by installer or manually)
 CONFIG_PATH="__CONFIG_PATH__"
@@ -991,9 +1039,19 @@ clear_standby_timer() {
 }
 
 start_vlc() {
+    local -a audio_arguments=()
+
+    if [[ "$AUDIO_OUTPUT" == "alsa" ]]; then
+        if [[ -z "$ALSA_AUDIO_DEVICE" ]]; then
+            log "WARN" "ALSA audio output selected without a device; using VLC default"
+        else
+            audio_arguments=(--aout=alsa --alsa-audio-device="$ALSA_AUDIO_DEVICE")
+            log "INFO" "Using VLC ALSA audio device: $ALSA_AUDIO_DEVICE"
+        fi
+    fi
     log "INFO" "Starting VLC with URL: $STREAM_URL"
 
-    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" \
+    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" "${audio_arguments[@]}" \
         --no-video-title-show \
         --no-interact \
         --no-qt-error-dialogs \
@@ -1106,6 +1164,8 @@ EOF
 
     sed -i "s|__CONFIG_PATH__|$CONFIG_PATH|g" "$tmpfile"
     sed -i "s|__FAILOVER_BROWSER__|$FAILOVER_BROWSER|g" "$tmpfile"
+    sed -i "s|__AUDIO_OUTPUT__|$AUDIO_OUTPUT|g" "$tmpfile"
+    sed -i "s|__ALSA_AUDIO_DEVICE__|$ALSA_AUDIO_DEVICE|g" "$tmpfile"
     sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
 
     if [[ -f "$WRAPPER_PATH" ]]; then
@@ -1141,6 +1201,8 @@ write_local_conf() {
 STREAM_URL="$FEED_URL"
 BROWSER_URL="$BROWSER_URL"
 FAILOVER_BROWSER="$FAILOVER_BROWSER"
+AUDIO_OUTPUT="$AUDIO_OUTPUT"
+ALSA_AUDIO_DEVICE="$ALSA_AUDIO_DEVICE"
 LOCALEOF
 
     if [[ -f "$conf_path" ]]; then
@@ -1679,6 +1741,7 @@ main() {
     resolve_failover_browser
     prepare_directories
     load_existing_config
+    resolve_audio_output
     prompt_url
     prompt_browser_url
     prompt_schedule_url

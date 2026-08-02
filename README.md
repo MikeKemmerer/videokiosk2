@@ -74,6 +74,9 @@ Configuration can be supplied interactively or with `--feed-url`,
 `--browser-url`, `--schedule-url`, `--restart-delay-minutes`, and GPIO flags.
 The installer writes the final values into generated scripts. `local.conf` can
 also set `FAILOVER_BROWSER` when you need to override the OS-based default.
+Use `--audio-output alsa --alsa-audio-device DEVICE` to make VLC use a specific
+ALSA device, such as `hdmi:CARD=PCH,DEV=0`; `--audio-output auto` retains VLC's
+normal output selection.
 Run it again to change settings.
 
 ## License
