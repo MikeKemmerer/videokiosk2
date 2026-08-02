@@ -3,3 +3,11 @@
 # This file is sourced by vlc-wrapper.sh at runtime.
 STREAM_URL="http://your-stream-server:8086/0.ts"
 BROWSER_URL="http://your-calendar-server:8000"
+# Use direct ALSA output for a specific HDMI device when needed.
+# List available HDMI identifiers with: aplay -L | grep '^hdmi:'
+# AUDIO_OUTPUT="alsa"
+# ALSA_AUDIO_DEVICE="hdmi:CARD=PCH,DEV=0"
+# Optional override: set to "midori" or "falkon" to bypass OS detection.
+# FAILOVER_BROWSER="falkon"
+# Falkon UI scale. Supported values: 1, 1.25, 1.5, 1.75, or 2.
+# BROWSER_SCALE="1"

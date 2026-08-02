@@ -37,6 +37,20 @@ DEFAULT_URL="http://your-stream-server:8086/2.ts"
 DEFAULT_BROWSER_URL="http://your-calendar-server:8000"
 DEFAULT_SCHEDULE_URL="http://your-calendar-server:8000/api/service-restart-schedule"
 DEFAULT_RESTART_DELAY_MINUTES=0
+FEED_URL="${FEED_URL:-}"
+BROWSER_URL="${BROWSER_URL:-}"
+SCHEDULE_URL="${SCHEDULE_URL:-}"
+RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-}"
+FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
+BROWSER_SCALE="${BROWSER_SCALE:-}"
+BROWSER_SCALE_OPTION=""
+AUDIO_OUTPUT="${AUDIO_OUTPUT:-}"
+AUDIO_OUTPUT_OPTION=""
+ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
+ALSA_AUDIO_DEVICE_OPTION=""
+NON_INTERACTIVE=0
+ASSUME_YES=0
+GPIO_SELECTION_EXPLICIT=0
 
 usage() {
     cat <<EOF
@@ -48,6 +62,19 @@ Options:
   --config-dir PATH   Store generated configuration (default: /etc/videokiosk2).
   --x-display DISPLAY X11 display to use (default: :0).
     --xauthority PATH   Xauthority file for the kiosk user (auto-detected by default).
+    --feed-url URL       Video feed URL.
+    --browser-url URL    Failover browser URL.
+    --browser-scale SCALE  Falkon UI scale: 1, 1.25, 1.5, 1.75, or 2 (default: 1).
+    --schedule-url URL   Restart schedule API URL.
+    --restart-delay-minutes MINUTES  Delay scheduled restarts by this many minutes.
+    --audio-output MODE   Select auto or alsa audio output (default: auto).
+    --alsa-audio-device DEVICE  ALSA device used with --audio-output alsa.
+                               Find HDMI devices with: aplay -L | grep '^hdmi:'
+    --enable-gpio-restart  Install the GPIO restart button monitor.
+    --disable-gpio-restart Do not install the GPIO restart button monitor.
+    --gpio-pin PIN       GPIO pin for the restart button (also enables it).
+    --non-interactive    Require values through command-line options.
+    --yes                Overwrite installer-managed files without prompting.
     --configure-apparmor-only  Reload the Ubuntu AppArmor profile and service drop-ins.
   -h, --help          Show this help.
 EOF
@@ -81,6 +108,66 @@ parse_arguments() {
                 [[ -n "$XAUTHORITY_PATH" ]] || { echo "--xauthority requires a path." >&2; exit 1; }
                 XAUTHORITY_EXPLICIT=1
                 shift 2
+                ;;
+            --feed-url)
+                FEED_URL="${2:-}"
+                [[ -n "$FEED_URL" ]] || { echo "--feed-url requires a URL." >&2; exit 1; }
+                shift 2
+                ;;
+            --browser-url)
+                BROWSER_URL="${2:-}"
+                [[ -n "$BROWSER_URL" ]] || { echo "--browser-url requires a URL." >&2; exit 1; }
+                shift 2
+                ;;
+            --browser-scale)
+                BROWSER_SCALE_OPTION="${2:-}"
+                [[ -n "$BROWSER_SCALE_OPTION" ]] || { echo "--browser-scale requires a scale." >&2; exit 1; }
+                shift 2
+                ;;
+            --schedule-url)
+                SCHEDULE_URL="${2:-}"
+                [[ -n "$SCHEDULE_URL" ]] || { echo "--schedule-url requires a URL." >&2; exit 1; }
+                shift 2
+                ;;
+            --restart-delay-minutes)
+                RESTART_DELAY_MINUTES="${2:-}"
+                [[ -n "$RESTART_DELAY_MINUTES" ]] || { echo "--restart-delay-minutes requires minutes." >&2; exit 1; }
+                shift 2
+                ;;
+            --audio-output)
+                AUDIO_OUTPUT_OPTION="${2:-}"
+                [[ -n "$AUDIO_OUTPUT_OPTION" ]] || { echo "--audio-output requires auto or alsa." >&2; exit 1; }
+                shift 2
+                ;;
+            --alsa-audio-device)
+                ALSA_AUDIO_DEVICE_OPTION="${2:-}"
+                [[ -n "$ALSA_AUDIO_DEVICE_OPTION" ]] || { echo "--alsa-audio-device requires a device." >&2; exit 1; }
+                shift 2
+                ;;
+            --enable-gpio-restart)
+                INSTALL_GPIO=1
+                GPIO_SELECTION_EXPLICIT=1
+                shift
+                ;;
+            --disable-gpio-restart)
+                INSTALL_GPIO=0
+                GPIO_SELECTION_EXPLICIT=1
+                shift
+                ;;
+            --gpio-pin)
+                GPIO_PIN="${2:-}"
+                [[ -n "$GPIO_PIN" ]] || { echo "--gpio-pin requires a pin number." >&2; exit 1; }
+                INSTALL_GPIO=1
+                GPIO_SELECTION_EXPLICIT=1
+                shift 2
+                ;;
+            --non-interactive)
+                NON_INTERACTIVE=1
+                shift
+                ;;
+            --yes)
+                ASSUME_YES=1
+                shift
                 ;;
             --configure-apparmor-only)
                 APPARMOR_ONLY=1
@@ -197,8 +284,12 @@ discover_xauthority() {
     done
 
     XAUTHORITY_PATH="${XAUTHORITY_PATH:-$KIOSK_HOME/.Xauthority}"
-    echo "Warning: could not verify X11 authorization for $X_DISPLAY; using $XAUTHORITY_PATH." >&2
-    echo "Rerun with --xauthority PATH after finding a file that passes xset q." >&2
+    if pgrep -x Xorg >/dev/null 2>&1; then
+        echo "Warning: could not verify X11 authorization for $X_DISPLAY." >&2
+        echo "The service will retry discovery when it starts." >&2
+    else
+        echo "No active X11 session for $X_DISPLAY yet; authority discovery will run after graphical login."
+    fi
 }
 
 prepare_directories() {
@@ -220,6 +311,10 @@ load_existing_config() {
         # Strip trailing \r in case the file has Windows line endings
         STREAM_URL="${STREAM_URL%$'\r'}"
         BROWSER_URL="${BROWSER_URL%$'\r'}"
+        FAILOVER_BROWSER="${FAILOVER_BROWSER%$'\r'}"
+        BROWSER_SCALE="${BROWSER_SCALE%$'\r'}"
+        AUDIO_OUTPUT="${AUDIO_OUTPUT%$'\r'}"
+        ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE%$'\r'}"
         [[ -n "${STREAM_URL:-}" ]] && DEFAULT_URL="$STREAM_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_BROWSER_URL="$BROWSER_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_SCHEDULE_URL="${BROWSER_URL}/api/service-restart-schedule"
@@ -238,6 +333,110 @@ is_ubuntu() {
     # shellcheck disable=SC1091
     source "$OS_RELEASE_FILE"
     [[ "${ID:-}" == "ubuntu" ]]
+}
+
+is_raspberry_pi_os() {
+    local os_name pretty_name id_like
+
+    [[ -r "$OS_RELEASE_FILE" ]] || return 1
+    # shellcheck disable=SC1091
+    source "$OS_RELEASE_FILE"
+
+    [[ "${ID:-}" == "raspbian" ]] && return 0
+
+    id_like="${ID_LIKE:-}"
+    [[ "$id_like" == *raspbian* ]] && return 0
+
+    os_name="${NAME:-}"
+    pretty_name="${PRETTY_NAME:-}"
+    [[ "$os_name" == *"Raspberry Pi OS"* || "$pretty_name" == *"Raspberry Pi OS"* ]]
+}
+
+resolve_failover_browser() {
+    if [[ -n "$FAILOVER_BROWSER" ]]; then
+        case "$FAILOVER_BROWSER" in
+            midori|falkon) return ;;
+            *)
+                echo "FAILOVER_BROWSER must be 'midori' or 'falkon'." >&2
+                exit 1
+                ;;
+        esac
+    fi
+
+    if is_raspberry_pi_os; then
+        FAILOVER_BROWSER="midori"
+    else
+        FAILOVER_BROWSER="falkon"
+    fi
+}
+
+resolve_browser_scale() {
+    if [[ -n "$BROWSER_SCALE_OPTION" ]]; then
+        BROWSER_SCALE="$BROWSER_SCALE_OPTION"
+    fi
+    BROWSER_SCALE="${BROWSER_SCALE:-1}"
+
+    case "$BROWSER_SCALE" in
+        1|1.25|1.5|1.75|2) ;;
+        *)
+            echo "BROWSER_SCALE must be 1, 1.25, 1.5, 1.75, or 2." >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ "$FAILOVER_BROWSER" == "midori" && "$BROWSER_SCALE" != "1" ]]; then
+        echo "BROWSER_SCALE is supported only by the Falkon failover browser." >&2
+        exit 1
+    fi
+}
+
+show_alsa_device_hint() {
+    local hdmi_devices
+
+    echo "To list available ALSA devices later, run: aplay -L"
+    if ! command -v aplay >/dev/null 2>&1; then
+        echo "Install alsa-utils to list device identifiers on this host."
+        return
+    fi
+
+    hdmi_devices=$(aplay -L 2>/dev/null | sed -n '/^hdmi:/p')
+    if [[ -n "$hdmi_devices" ]]; then
+        echo "Available HDMI ALSA devices:"
+        while IFS= read -r device; do
+            echo "  $device"
+        done <<< "$hdmi_devices"
+    else
+        echo "No HDMI ALSA devices were reported by aplay -L."
+    fi
+}
+
+resolve_audio_output() {
+    if [[ -n "$AUDIO_OUTPUT_OPTION" ]]; then
+        AUDIO_OUTPUT="$AUDIO_OUTPUT_OPTION"
+    fi
+    if [[ -n "$ALSA_AUDIO_DEVICE_OPTION" ]]; then
+        ALSA_AUDIO_DEVICE="$ALSA_AUDIO_DEVICE_OPTION"
+    fi
+    AUDIO_OUTPUT="${AUDIO_OUTPUT:-auto}"
+
+    case "$AUDIO_OUTPUT" in
+        auto) ;;
+        alsa)
+            if [[ -z "$ALSA_AUDIO_DEVICE" ]]; then
+                if [[ $NON_INTERACTIVE -eq 1 ]]; then
+                    echo "--non-interactive --audio-output alsa requires --alsa-audio-device." >&2
+                    exit 1
+                fi
+                show_alsa_device_hint
+                read -r -p "ALSA audio device [default: hdmi:CARD=PCH,DEV=0]: " ALSA_AUDIO_DEVICE
+                ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-hdmi:CARD=PCH,DEV=0}"
+            fi
+            ;;
+        *)
+            echo "AUDIO_OUTPUT must be 'auto' or 'alsa'." >&2
+            exit 1
+            ;;
+    esac
 }
 
 is_apparmor_safe_path() {
@@ -282,6 +481,7 @@ profile $APPARMOR_PROFILE_NAME flags=(complain) {
   /usr/bin/** rix,
   /usr/sbin/** rix,
     /usr/lib/cargo/bin/coreutils/** rix,
+    /usr/bin/falkon ux,
   /snap/bin/** rix,
   /lib/** mr,
   /usr/lib/** mr,
@@ -369,8 +569,11 @@ command_for_prerequisite() {
                 return 1
             fi
             ;;
+        falkon) command -v falkon ;;
         x11-apps) command -v xwd ;;
         x11-xserver-utils) command -v xset ;;
+        x11-utils) command -v xprop ;;
+        xdotool) command -v xdotool ;;
         cec-utils) command -v cec-client ;;
         gpiod) command -v gpiomon ;;
         *) command -v "$prerequisite" ;;
@@ -386,13 +589,22 @@ report_unavailable_prerequisites() {
     for prerequisite in "${unavailable[@]}"; do
         case "$prerequisite" in
             midori)
-                echo "  - Midori browser (install a 'midori' command or /snap/bin/midori)"
+                echo "  - Midori browser (normally provided by midori)"
+                ;;
+            falkon)
+                echo "  - Falkon browser (normally provided by falkon)"
                 ;;
             x11-apps)
                 echo "  - xwd screen capture command (normally provided by x11-apps)"
                 ;;
             x11-xserver-utils)
                 echo "  - xset X11 utility (normally provided by x11-xserver-utils)"
+                ;;
+            x11-utils)
+                echo "  - xprop X11 utility (normally provided by x11-utils)"
+                ;;
+            xdotool)
+                echo "  - xdotool X11 automation utility (normally provided by xdotool)"
                 ;;
             cec-utils)
                 echo "  - cec-client command (normally provided by cec-utils)"
@@ -409,7 +621,10 @@ report_unavailable_prerequisites() {
 }
 
 install_packages() {
-    local required=(vlc midori x11-apps x11-xserver-utils curl python3 cec-utils)
+    local required=(vlc "$FAILOVER_BROWSER" x11-apps x11-xserver-utils curl python3 cec-utils)
+    if [[ "$FAILOVER_BROWSER" == "falkon" ]]; then
+        required+=(x11-utils xdotool)
+    fi
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
     fi
@@ -466,9 +681,12 @@ install_packages() {
 }
 
 prompt_url() {
-    echo
-    read -r -p "Enter the video feed URL [default: $DEFAULT_URL]: " FEED_URL
-    FEED_URL="${FEED_URL:-$DEFAULT_URL}"
+    if [[ -z "$FEED_URL" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --feed-url." >&2; exit 1; }
+        echo
+        read -r -p "Enter the video feed URL [default: $DEFAULT_URL]: " FEED_URL
+        FEED_URL="${FEED_URL:-$DEFAULT_URL}"
+    fi
 
     if [[ ! "$FEED_URL" =~ ^https?://[^[:space:]]+$ ]]; then
         echo "Invalid URL format: $FEED_URL" >&2
@@ -479,9 +697,12 @@ prompt_url() {
 }
 
 prompt_schedule_url() {
-    echo
-    read -r -p "Enter restart schedule API URL [default: $DEFAULT_SCHEDULE_URL]: " SCHEDULE_URL
-    SCHEDULE_URL="${SCHEDULE_URL:-$DEFAULT_SCHEDULE_URL}"
+    if [[ -z "$SCHEDULE_URL" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --schedule-url." >&2; exit 1; }
+        echo
+        read -r -p "Enter restart schedule API URL [default: $DEFAULT_SCHEDULE_URL]: " SCHEDULE_URL
+        SCHEDULE_URL="${SCHEDULE_URL:-$DEFAULT_SCHEDULE_URL}"
+    fi
 
     if [[ ! "$SCHEDULE_URL" =~ ^https?://[^[:space:]]+$ ]]; then
         echo "Invalid URL format: $SCHEDULE_URL" >&2
@@ -492,9 +713,12 @@ prompt_schedule_url() {
 }
 
 prompt_browser_url() {
-    echo
-    read -r -p "Enter failover browser URL [default: $DEFAULT_BROWSER_URL]: " BROWSER_URL
-    BROWSER_URL="${BROWSER_URL:-$DEFAULT_BROWSER_URL}"
+    if [[ -z "$BROWSER_URL" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --browser-url." >&2; exit 1; }
+        echo
+        read -r -p "Enter failover browser URL [default: $DEFAULT_BROWSER_URL]: " BROWSER_URL
+        BROWSER_URL="${BROWSER_URL:-$DEFAULT_BROWSER_URL}"
+    fi
 
     if [[ ! "$BROWSER_URL" =~ ^https?://[^[:space:]]+$ ]]; then
         echo "Invalid URL format: $BROWSER_URL" >&2
@@ -505,26 +729,42 @@ prompt_browser_url() {
 }
 
 prompt_gpio_button() {
-    echo
-    read -r -p "Install GPIO button restart monitor? (y/N): " gpio_ans
-    if [[ "$gpio_ans" == "y" || "$gpio_ans" == "Y" ]]; then
-        INSTALL_GPIO=1
-        read -r -p "GPIO pin number [default: $DEFAULT_GPIO_PIN]: " gpio_pin_input
-        GPIO_PIN="${gpio_pin_input:-$DEFAULT_GPIO_PIN}"
+    local gpio_ans gpio_pin_input
+
+    if [[ $GPIO_SELECTION_EXPLICIT -eq 0 ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires a GPIO selection." >&2; exit 1; }
+        echo
+        read -r -p "Install GPIO button restart monitor? (y/N): " gpio_ans
+        if [[ "$gpio_ans" == "y" || "$gpio_ans" == "Y" ]]; then
+            INSTALL_GPIO=1
+        else
+            INSTALL_GPIO=0
+        fi
+    fi
+
+    if (( INSTALL_GPIO == 1 )); then
+        if [[ $GPIO_SELECTION_EXPLICIT -eq 0 ]]; then
+            read -r -p "GPIO pin number [default: $DEFAULT_GPIO_PIN]: " gpio_pin_input
+            GPIO_PIN="${gpio_pin_input:-$DEFAULT_GPIO_PIN}"
+        fi
         if [[ ! "$GPIO_PIN" =~ ^[0-9]+$ ]] || (( GPIO_PIN < 2 || GPIO_PIN > 27 )); then
             echo "Invalid GPIO pin: $GPIO_PIN (must be 2-27)" >&2
             exit 1
         fi
         echo "GPIO restart button will use pin $GPIO_PIN"
-    else
-        echo "Skipping GPIO button monitor."
+        return
     fi
+
+    echo "Skipping GPIO button monitor."
 }
 
 prompt_restart_delay_minutes() {
-    echo
-    read -r -p "Enter restart delay in minutes [default: ${DEFAULT_RESTART_DELAY_MINUTES}] (press Enter or 0 for no delay): " RESTART_DELAY_MINUTES
-    RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-$DEFAULT_RESTART_DELAY_MINUTES}"
+    if [[ -z "$RESTART_DELAY_MINUTES" ]]; then
+        [[ $NON_INTERACTIVE -eq 0 ]] || { echo "--non-interactive requires --restart-delay-minutes." >&2; exit 1; }
+        echo
+        read -r -p "Enter restart delay in minutes [default: ${DEFAULT_RESTART_DELAY_MINUTES}] (press Enter or 0 for no delay): " RESTART_DELAY_MINUTES
+        RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES:-$DEFAULT_RESTART_DELAY_MINUTES}"
+    fi
 
     if [[ ! "$RESTART_DELAY_MINUTES" =~ ^[0-9]+$ ]]; then
         echo "Restart delay must be a non-negative whole number of minutes." >&2
@@ -555,6 +795,19 @@ stop_service_if_running() {
     fi
 }
 
+confirm_overwrite() {
+    local path="$1"
+    local answer
+
+    [[ $ASSUME_YES -eq 1 ]] && return 0
+    if [[ $NON_INTERACTIVE -eq 1 ]]; then
+        echo "Refusing to overwrite $path without --yes." >&2
+        return 1
+    fi
+    read -r -p "Overwrite $path? (y/N): " answer
+    [[ "$answer" == "y" || "$answer" == "Y" ]]
+}
+
 write_wrapper() {
     local tmpfile
     tmpfile=$(mktemp)
@@ -564,6 +817,10 @@ write_wrapper() {
 
 STREAM_URL="http://your-stream-server:8086/2.ts"
 BROWSER_URL="http://your-calendar-server:8000"
+FAILOVER_BROWSER="__FAILOVER_BROWSER__"
+BROWSER_SCALE="__BROWSER_SCALE__"
+AUDIO_OUTPUT="__AUDIO_OUTPUT__"
+ALSA_AUDIO_DEVICE="__ALSA_AUDIO_DEVICE__"
 
 # Source local overrides if present (created by installer or manually)
 CONFIG_PATH="__CONFIG_PATH__"
@@ -576,7 +833,7 @@ THRESHOLD=5
 STARTUP_GRACE=20
 CHECK_INTERVAL=5
 VLC_LOG="/tmp/videokiosk2-vlc.log"
-MIDORI_LOG="/tmp/videokiosk2-midori.log"
+FAILOVER_LOG="/tmp/videokiosk2-failover.log"
 
 CPU_IDLE_THRESHOLD=2
 PREV_CPU=20
@@ -606,6 +863,9 @@ resolve_x11_session() {
 
     runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export XDG_RUNTIME_DIR="$runtime_dir"
+    if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -S "$runtime_dir/bus" ]]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+    fi
     [[ -n "${XAUTHORITY:-}" ]] && candidates+=("$XAUTHORITY")
     candidates+=("$HOME/.Xauthority")
 
@@ -629,6 +889,41 @@ resolve_x11_session() {
     return 1
 }
 
+disable_screen_blanking() {
+    xset s off || log "WARN" "Unable to disable the X11 screen saver"
+    xset -dpms || log "WARN" "Unable to disable DPMS"
+    xset s noblank || log "WARN" "Unable to disable X11 screen blanking"
+}
+
+detect_failover_browser() {
+    local os_name pretty_name id_like
+
+    if [[ -n "${FAILOVER_BROWSER:-}" ]]; then
+        case "$FAILOVER_BROWSER" in
+            midori|falkon) return ;;
+            *)
+                log "WARN" "Unknown FAILOVER_BROWSER '$FAILOVER_BROWSER'; falling back to OS detection"
+                FAILOVER_BROWSER=""
+                ;;
+        esac
+    fi
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        source /etc/os-release
+        [[ "${ID:-}" == "raspbian" ]] && FAILOVER_BROWSER="midori"
+        id_like="${ID_LIKE:-}"
+        os_name="${NAME:-}"
+        pretty_name="${PRETTY_NAME:-}"
+        if [[ -z "${FAILOVER_BROWSER:-}" ]] && [[ "$id_like" == *raspbian* || "$os_name" == *"Raspberry Pi OS"* || "$pretty_name" == *"Raspberry Pi OS"* ]]; then
+            FAILOVER_BROWSER="midori"
+        fi
+    fi
+
+    FAILOVER_BROWSER="${FAILOVER_BROWSER:-falkon}"
+    BROWSER_SCALE="${BROWSER_SCALE:-1}"
+}
+
 midori_command() {
     if command -v midori >/dev/null 2>&1; then
         command -v midori
@@ -639,27 +934,137 @@ midori_command() {
     fi
 }
 
+falkon_command() {
+    command -v falkon
+}
+
+validate_falkon_scale() {
+    case "$BROWSER_SCALE" in
+        1|1.25|1.5|1.75|2) ;;
+        *)
+            log "WARN" "Invalid BROWSER_SCALE '$BROWSER_SCALE'; using 1"
+            BROWSER_SCALE=1
+            ;;
+    esac
+}
+
+ensure_falkon_fullscreen() {
+    local attempt window_id window_state
+
+    if ! command -v xprop >/dev/null 2>&1; then
+        log "WARN" "Cannot verify Falkon fullscreen because xprop is unavailable"
+        return
+    fi
+
+    for attempt in {1..10}; do
+        window_id=$(xdotool search --onlyvisible --class falkon 2>/dev/null | tail -n 1)
+        if [[ -n "$window_id" ]]; then
+            window_state=$(xprop -id "$window_id" _NET_WM_STATE 2>/dev/null || true)
+            if [[ "$window_state" != *"_NET_WM_STATE_FULLSCREEN"* ]]; then
+                xdotool key --window "$window_id" F11
+            fi
+            return
+        fi
+        sleep 1
+    done
+
+    log "WARN" "Could not find a Falkon window to enter fullscreen"
+}
+
+configure_falkon_kiosk() {
+    local settings_file settings_dir temporary_file
+
+    settings_dir="${XDG_CONFIG_HOME:-$HOME/.config}/falkon/profiles/default"
+    settings_file="$settings_dir/settings.ini"
+    install -d -m 700 "$settings_dir"
+    [[ -f "$settings_file" ]] || : >"$settings_file"
+    temporary_file=$(mktemp "$settings_dir/settings.ini.XXXXXX")
+
+    awk '
+        BEGIN { in_section = 0; section_found = 0; setting_written = 0 }
+        /^\[Browser-View-Settings\]$/ {
+            in_section = 1
+            section_found = 1
+            print
+            next
+        }
+        /^\[/ {
+            if (in_section && !setting_written) {
+                print "showNavigationToolbar=false"
+                setting_written = 1
+            }
+            in_section = 0
+        }
+        in_section && /^showNavigationToolbar=/ { next }
+        { print }
+        END {
+            if (in_section && !setting_written) {
+                print "showNavigationToolbar=false"
+            } else if (!section_found) {
+                print "[Browser-View-Settings]"
+                print "showNavigationToolbar=false"
+            }
+        }
+    ' "$settings_file" 2>/dev/null >"$temporary_file"
+    mv "$temporary_file" "$settings_file"
+}
+
 launch_midori() {
     local midori_path midori_status
     if ! pgrep -x midori >/dev/null; then
         if ! midori_path=$(midori_command); then
-            log "ERROR" "Midori failover is unavailable: install Midori and restart videokiosk2"
+            log "ERROR" "Failover browser is unavailable: install midori and restart videokiosk2"
             return 1
         fi
         log "INFO" "Launching Midori failover browser with X11 backend"
-        : >"$MIDORI_LOG"
+        : >"$FAILOVER_LOG"
         env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
-            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$MIDORI_LOG" 2>&1
+            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1
         midori_status=$?
         if (( midori_status != 0 )); then
             if [[ "$midori_path" == /snap/bin/* ]] && command -v snap >/dev/null 2>&1; then
-                snap logs midori -n=50 >>"$MIDORI_LOG" 2>&1 || true
+                snap logs midori -n=50 >>"$FAILOVER_LOG" 2>&1 || true
             fi
-            log "ERROR" "Midori exited with status $midori_status; see $MIDORI_LOG"
+            log "ERROR" "Midori exited with status $midori_status; see $FAILOVER_LOG"
             return 1
         fi
     else
         log "INFO" "Midori already running"
+    fi
+}
+
+launch_failover_browser() {
+    detect_failover_browser
+
+    if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
+        launch_midori
+        return
+    fi
+
+    local falkon_path falkon_pid falkon_status
+    if ! pgrep -x falkon >/dev/null; then
+        if ! falkon_path=$(falkon_command); then
+            log "ERROR" "Failover browser is unavailable: install falkon and restart videokiosk2"
+            return 1
+        fi
+        configure_falkon_kiosk
+        validate_falkon_scale
+        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
+        : >"$FAILOVER_LOG"
+        env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR="$BROWSER_SCALE" "$falkon_path" \
+            --private-browsing \
+            --no-extensions \
+            --fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1 &
+        falkon_pid=$!
+        ensure_falkon_fullscreen
+        wait "$falkon_pid"
+        falkon_status=$?
+        if (( falkon_status != 0 )); then
+            log "ERROR" "Falkon exited with status $falkon_status; see $FAILOVER_LOG"
+            return 1
+        fi
+    else
+        log "INFO" "Falkon failover browser already running"
     fi
 }
 
@@ -698,14 +1103,23 @@ clear_standby_timer() {
 }
 
 start_vlc() {
+    local -a audio_arguments=()
+
+    if [[ "$AUDIO_OUTPUT" == "alsa" ]]; then
+        if [[ -z "$ALSA_AUDIO_DEVICE" ]]; then
+            log "WARN" "ALSA audio output selected without a device; using VLC default"
+        else
+            audio_arguments=(--aout=alsa --alsa-audio-device="$ALSA_AUDIO_DEVICE")
+            log "INFO" "Using VLC ALSA audio device: $ALSA_AUDIO_DEVICE"
+        fi
+    fi
     log "INFO" "Starting VLC with URL: $STREAM_URL"
 
-    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" \
+    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" "${audio_arguments[@]}" \
         --no-video-title-show \
         --no-interact \
         --no-qt-error-dialogs \
         --no-qt-privacy-ask \
-        --no-qt-updates-notif \
         --no-qt-system-tray \
         --qt-notification=0 \
         --quiet \
@@ -728,6 +1142,7 @@ get_cpu_usage() {
 }
 
 resolve_x11_session || exit 1
+disable_screen_blanking
 sleep 20
 check_standby_timer
 start_vlc
@@ -735,7 +1150,7 @@ sleep 5
 
 if ! vlc_running; then
     log "ERROR" "VLC failed to start; see $VLC_LOG"
-    launch_midori
+    launch_failover_browser
     mark_midori_start
     exit 0
 fi
@@ -789,7 +1204,7 @@ while vlc_running; do
     if (( FREEZE_COUNT >= THRESHOLD && CPU_LOW_COUNT >= THRESHOLD )); then
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
-        launch_midori
+        launch_failover_browser
         mark_midori_start
         exit 0
     fi
@@ -797,7 +1212,7 @@ while vlc_running; do
     if (( CPU_ZERO_COUNT >= THRESHOLD )); then
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
-        launch_midori
+        launch_failover_browser
         mark_midori_start
         exit 0
     fi
@@ -805,13 +1220,17 @@ while vlc_running; do
     sleep "$CHECK_INTERVAL"
 done
 
-log "WARN" "VLC exited unexpectedly. Launching Midori."
-launch_midori
+log "WARN" "VLC exited unexpectedly. Launching failover browser."
+launch_failover_browser
 mark_midori_start
 exit 0
 EOF
 
     sed -i "s|__CONFIG_PATH__|$CONFIG_PATH|g" "$tmpfile"
+    sed -i "s|__FAILOVER_BROWSER__|$FAILOVER_BROWSER|g" "$tmpfile"
+    sed -i "s|__BROWSER_SCALE__|$BROWSER_SCALE|g" "$tmpfile"
+    sed -i "s|__AUDIO_OUTPUT__|$AUDIO_OUTPUT|g" "$tmpfile"
+    sed -i "s|__ALSA_AUDIO_DEVICE__|$ALSA_AUDIO_DEVICE|g" "$tmpfile"
     sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
 
     if [[ -f "$WRAPPER_PATH" ]]; then
@@ -823,8 +1242,7 @@ EOF
         echo
         echo "Existing $WRAPPER_PATH found. Showing diff:"
         diff -u "$WRAPPER_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $WRAPPER_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$WRAPPER_PATH"; then
             echo "Keeping existing wrapper."
             rm -f "$tmpfile"
             return
@@ -847,6 +1265,10 @@ write_local_conf() {
 # videokiosk2 local configuration — generated by installer
 STREAM_URL="$FEED_URL"
 BROWSER_URL="$BROWSER_URL"
+FAILOVER_BROWSER="$FAILOVER_BROWSER"
+BROWSER_SCALE="$BROWSER_SCALE"
+AUDIO_OUTPUT="$AUDIO_OUTPUT"
+ALSA_AUDIO_DEVICE="$ALSA_AUDIO_DEVICE"
 LOCALEOF
 
     if [[ -f "$conf_path" ]]; then
@@ -858,8 +1280,7 @@ LOCALEOF
         echo
         echo "Existing $conf_path found. Showing diff:"
         diff -u "$conf_path" "$tmpfile" || true
-        read -r -p "Overwrite $conf_path? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$conf_path"; then
             echo "Keeping existing local.conf."
             rm -f "$tmpfile"
             return
@@ -1081,8 +1502,7 @@ EOF
         echo
         echo "Existing $SCHEDULER_SCRIPT_PATH found. Showing diff:"
         diff -u "$SCHEDULER_SCRIPT_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $SCHEDULER_SCRIPT_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$SCHEDULER_SCRIPT_PATH"; then
             echo "Keeping existing scheduler script."
             rm -f "$tmpfile"
             return
@@ -1097,7 +1517,14 @@ EOF
 }
 
 write_service() {
-    local tmpfile
+    local tmpfile service_exec_stop service_xauthority_line
+
+    service_exec_stop="/usr/bin/pkill -TERM -f vlc-wrapper.sh"
+    service_xauthority_line="Environment=XAUTHORITY=$XAUTHORITY_PATH"
+    if ! is_raspberry_pi_os; then
+        service_exec_stop="-/usr/bin/pkill -TERM -f vlc-wrapper.sh"
+        service_xauthority_line=""
+    fi
     tmpfile=$(mktemp)
 
     cat > "$tmpfile" <<EOF
@@ -1117,13 +1544,13 @@ KillSignal=SIGTERM
 SendSIGKILL=yes
 TimeoutStopSec=5
 
-ExecStop=/usr/bin/pkill -TERM -f vlc-wrapper.sh
-ExecStopPost=/usr/bin/pkill -TERM vlc
-ExecStopPost=/usr/bin/pkill -TERM midori
+ExecStop=$service_exec_stop
+ExecStopPost=-/usr/bin/pkill -TERM vlc
+ExecStopPost=-/usr/bin/pkill -TERM $FAILOVER_BROWSER
 
 User=$KIOSK_USER
 Environment=DISPLAY=$X_DISPLAY
-Environment=XAUTHORITY=$XAUTHORITY_PATH
+$service_xauthority_line
 Environment=XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR_PATH
 
 [Install]
@@ -1139,8 +1566,7 @@ EOF
         echo
         echo "Existing $SERVICE_PATH found. Showing diff:"
         diff -u "$SERVICE_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $SERVICE_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$SERVICE_PATH"; then
             echo "Keeping existing service file."
             rm -f "$tmpfile"
             return
@@ -1185,8 +1611,7 @@ EOF
         echo
         echo "Existing $SCHEDULER_SERVICE_PATH found. Showing diff:"
         diff -u "$SCHEDULER_SERVICE_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $SCHEDULER_SERVICE_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$SCHEDULER_SERVICE_PATH"; then
             echo "Keeping existing scheduler service file."
             rm -f "$tmpfile"
             return
@@ -1261,8 +1686,7 @@ GPIOEOF
         echo
         echo "Existing $GPIO_SCRIPT_PATH found. Showing diff:"
         diff -u "$GPIO_SCRIPT_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $GPIO_SCRIPT_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$GPIO_SCRIPT_PATH"; then
             echo "Keeping existing GPIO restart script."
             rm -f "$tmpfile"
             return
@@ -1306,8 +1730,7 @@ EOF
         echo
         echo "Existing $GPIO_SERVICE_PATH found. Showing diff:"
         diff -u "$GPIO_SERVICE_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $GPIO_SERVICE_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$GPIO_SERVICE_PATH"; then
             echo "Keeping existing GPIO service file."
             rm -f "$tmpfile"
             return
@@ -1339,8 +1762,7 @@ SUDOERSEOF
         echo
         echo "Existing $GPIO_SUDOERS_PATH found. Showing diff:"
         diff -u "$GPIO_SUDOERS_PATH" "$tmpfile" || true
-        read -r -p "Overwrite $GPIO_SUDOERS_PATH? (y/N): " ans
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        if ! confirm_overwrite "$GPIO_SUDOERS_PATH"; then
             echo "Keeping existing sudoers rule."
             rm -f "$tmpfile"
             return
@@ -1382,8 +1804,11 @@ main() {
         return
     fi
     resolve_kiosk_user
-    prepare_directories
     load_existing_config
+    resolve_failover_browser
+    resolve_browser_scale
+    prepare_directories
+    resolve_audio_output
     prompt_url
     prompt_browser_url
     prompt_schedule_url

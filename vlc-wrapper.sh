@@ -2,6 +2,10 @@
 
 STREAM_URL="http://your-stream-server:8086/0.ts"
 BROWSER_URL="http://your-calendar-server:8000"
+FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
+BROWSER_SCALE="${BROWSER_SCALE:-1}"
+AUDIO_OUTPUT="${AUDIO_OUTPUT:-auto}"
+ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
 
 # Source generated configuration, retaining the legacy adjacent config fallback
 # for manually run copies of this wrapper.
@@ -19,7 +23,7 @@ THRESHOLD=5
 STARTUP_GRACE=20
 CHECK_INTERVAL=5
 VLC_LOG="/tmp/videokiosk2-vlc.log"
-MIDORI_LOG="/tmp/videokiosk2-midori.log"
+FAILOVER_LOG="/tmp/videokiosk2-failover.log"
 
 CPU_IDLE_THRESHOLD=2
 PREV_CPU=20
@@ -47,6 +51,9 @@ resolve_x11_session() {
 
     runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
     export XDG_RUNTIME_DIR="$runtime_dir"
+    if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -S "$runtime_dir/bus" ]]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+    fi
     [[ -n "${XAUTHORITY:-}" ]] && candidates+=("$XAUTHORITY")
     candidates+=("$HOME/.Xauthority")
 
@@ -70,6 +77,40 @@ resolve_x11_session() {
     return 1
 }
 
+disable_screen_blanking() {
+    xset s off || log "WARN" "Unable to disable the X11 screen saver"
+    xset -dpms || log "WARN" "Unable to disable DPMS"
+    xset s noblank || log "WARN" "Unable to disable X11 screen blanking"
+}
+
+detect_failover_browser() {
+    local os_name pretty_name id_like
+
+    if [[ -n "${FAILOVER_BROWSER:-}" ]]; then
+        case "$FAILOVER_BROWSER" in
+            midori|falkon) return ;;
+            *)
+                log "WARN" "Unknown FAILOVER_BROWSER '$FAILOVER_BROWSER'; falling back to OS detection"
+                FAILOVER_BROWSER=""
+                ;;
+        esac
+    fi
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        source /etc/os-release
+        [[ "${ID:-}" == "raspbian" ]] && FAILOVER_BROWSER="midori"
+        id_like="${ID_LIKE:-}"
+        os_name="${NAME:-}"
+        pretty_name="${PRETTY_NAME:-}"
+        if [[ -z "${FAILOVER_BROWSER:-}" ]] && [[ "$id_like" == *raspbian* || "$os_name" == *"Raspberry Pi OS"* || "$pretty_name" == *"Raspberry Pi OS"* ]]; then
+            FAILOVER_BROWSER="midori"
+        fi
+    fi
+
+    FAILOVER_BROWSER="${FAILOVER_BROWSER:-falkon}"
+}
+
 midori_command() {
     if command -v midori >/dev/null 2>&1; then
         command -v midori
@@ -80,23 +121,98 @@ midori_command() {
     fi
 }
 
+falkon_command() {
+    command -v falkon
+}
+
+validate_falkon_scale() {
+    case "$BROWSER_SCALE" in
+        1|1.25|1.5|1.75|2) ;;
+        *)
+            log "WARN" "Invalid BROWSER_SCALE '$BROWSER_SCALE'; using 1"
+            BROWSER_SCALE=1
+            ;;
+    esac
+}
+
+ensure_falkon_fullscreen() {
+    local attempt window_id window_state
+
+    if ! command -v xprop >/dev/null 2>&1; then
+        log "WARN" "Cannot verify Falkon fullscreen because xprop is unavailable"
+        return
+    fi
+
+    for attempt in {1..10}; do
+        window_id=$(xdotool search --onlyvisible --class falkon 2>/dev/null | tail -n 1)
+        if [[ -n "$window_id" ]]; then
+            window_state=$(xprop -id "$window_id" _NET_WM_STATE 2>/dev/null || true)
+            if [[ "$window_state" != *"_NET_WM_STATE_FULLSCREEN"* ]]; then
+                xdotool key --window "$window_id" F11
+            fi
+            return
+        fi
+        sleep 1
+    done
+
+    log "WARN" "Could not find a Falkon window to enter fullscreen"
+}
+
+configure_falkon_kiosk() {
+    local settings_file settings_dir temporary_file
+
+    settings_dir="${XDG_CONFIG_HOME:-$HOME/.config}/falkon/profiles/default"
+    settings_file="$settings_dir/settings.ini"
+    install -d -m 700 "$settings_dir"
+    [[ -f "$settings_file" ]] || : >"$settings_file"
+    temporary_file=$(mktemp "$settings_dir/settings.ini.XXXXXX")
+
+    awk '
+        BEGIN { in_section = 0; section_found = 0; setting_written = 0 }
+        /^\[Browser-View-Settings\]$/ {
+            in_section = 1
+            section_found = 1
+            print
+            next
+        }
+        /^\[/ {
+            if (in_section && !setting_written) {
+                print "showNavigationToolbar=false"
+                setting_written = 1
+            }
+            in_section = 0
+        }
+        in_section && /^showNavigationToolbar=/ { next }
+        { print }
+        END {
+            if (in_section && !setting_written) {
+                print "showNavigationToolbar=false"
+            } else if (!section_found) {
+                print "[Browser-View-Settings]"
+                print "showNavigationToolbar=false"
+            }
+        }
+    ' "$settings_file" 2>/dev/null >"$temporary_file"
+    mv "$temporary_file" "$settings_file"
+}
+
 launch_midori() {
     local midori_path midori_status
     if ! pgrep -x midori >/dev/null; then
         if ! midori_path=$(midori_command); then
-            log "ERROR" "Midori failover is unavailable: install Midori and restart videokiosk2"
+            log "ERROR" "Failover browser is unavailable: install midori and restart videokiosk2"
             return 1
         fi
         log "INFO" "Launching Midori failover browser with X11 backend"
-        : >"$MIDORI_LOG"
+        : >"$FAILOVER_LOG"
         env -u WAYLAND_DISPLAY GDK_BACKEND=x11 "$midori_path" \
-            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$MIDORI_LOG" 2>&1
+            -e SingleWindow -e Fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1
         midori_status=$?
         if (( midori_status != 0 )); then
             if [[ "$midori_path" == /snap/bin/* ]] && command -v snap >/dev/null 2>&1; then
-                snap logs midori -n=50 >>"$MIDORI_LOG" 2>&1 || true
+                snap logs midori -n=50 >>"$FAILOVER_LOG" 2>&1 || true
             fi
-            log "ERROR" "Midori exited with status $midori_status; see $MIDORI_LOG"
+            log "ERROR" "Midori exited with status $midori_status; see $FAILOVER_LOG"
             return 1
         fi
     else
@@ -104,15 +220,59 @@ launch_midori() {
     fi
 }
 
+launch_failover_browser() {
+    detect_failover_browser
+
+    if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
+        launch_midori
+        return
+    fi
+
+    local falkon_path falkon_pid falkon_status
+    if ! pgrep -x falkon >/dev/null; then
+        if ! falkon_path=$(falkon_command); then
+            log "ERROR" "Failover browser is unavailable: install falkon and restart videokiosk2"
+            return 1
+        fi
+        configure_falkon_kiosk
+        validate_falkon_scale
+        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
+        : >"$FAILOVER_LOG"
+        env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR="$BROWSER_SCALE" "$falkon_path" \
+            --private-browsing \
+            --no-extensions \
+            --fullscreen "$BROWSER_URL" >>"$FAILOVER_LOG" 2>&1 &
+        falkon_pid=$!
+        ensure_falkon_fullscreen
+        wait "$falkon_pid"
+        falkon_status=$?
+        if (( falkon_status != 0 )); then
+            log "ERROR" "Falkon exited with status $falkon_status; see $FAILOVER_LOG"
+            return 1
+        fi
+    else
+        log "INFO" "Falkon failover browser already running"
+    fi
+}
+
 start_vlc() {
+    local -a audio_arguments=()
+
+    if [[ "$AUDIO_OUTPUT" == "alsa" ]]; then
+        if [[ -z "$ALSA_AUDIO_DEVICE" ]]; then
+            log "WARN" "ALSA audio output selected without a device; using VLC default"
+        else
+            audio_arguments=(--aout=alsa --alsa-audio-device="$ALSA_AUDIO_DEVICE")
+            log "INFO" "Using VLC ALSA audio device: $ALSA_AUDIO_DEVICE"
+        fi
+    fi
     log "INFO" "Starting VLC with URL: $STREAM_URL"
 
-    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" \
+    env QT_QPA_PLATFORM=xcb vlc -f "$STREAM_URL" "${audio_arguments[@]}" \
         --no-video-title-show \
         --no-interact \
         --no-qt-error-dialogs \
         --no-qt-privacy-ask \
-        --no-qt-updates-notif \
         --no-qt-system-tray \
         --qt-notification=0 \
         --quiet \
@@ -135,13 +295,14 @@ get_cpu_usage() {
 }
 
 resolve_x11_session || exit 1
+disable_screen_blanking
 sleep 20
 start_vlc
 sleep 5
 
 if ! vlc_running; then
     log "ERROR" "VLC failed to start; see $VLC_LOG"
-    launch_midori
+    launch_failover_browser
     exit 0
 fi
 
@@ -193,20 +354,20 @@ while vlc_running; do
     if (( FREEZE_COUNT >= THRESHOLD && CPU_LOW_COUNT >= THRESHOLD )); then
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
-        launch_midori
+        launch_failover_browser
         exit 0
     fi
 
     if (( CPU_ZERO_COUNT >= THRESHOLD )); then
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
-        launch_midori
+        launch_failover_browser
         exit 0
     fi
 
     sleep "$CHECK_INTERVAL"
 done
 
-log "WARN" "VLC exited unexpectedly. Launching Midori."
-launch_midori
+log "WARN" "VLC exited unexpectedly. Launching failover browser."
+launch_failover_browser
 exit 0
