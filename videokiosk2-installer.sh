@@ -789,6 +789,12 @@ resolve_x11_session() {
     return 1
 }
 
+disable_screen_blanking() {
+    xset s off || log "WARN" "Unable to disable the X11 screen saver"
+    xset -dpms || log "WARN" "Unable to disable DPMS"
+    xset s noblank || log "WARN" "Unable to disable X11 screen blanking"
+}
+
 detect_failover_browser() {
     local os_name pretty_name id_like
 
@@ -1014,6 +1020,7 @@ get_cpu_usage() {
 }
 
 resolve_x11_session || exit 1
+disable_screen_blanking
 sleep 20
 check_standby_timer
 start_vlc
