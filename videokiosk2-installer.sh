@@ -66,6 +66,7 @@ Options:
     --restart-delay-minutes MINUTES  Delay scheduled restarts by this many minutes.
     --audio-output MODE   Select auto or alsa audio output (default: auto).
     --alsa-audio-device DEVICE  ALSA device used with --audio-output alsa.
+                               Find HDMI devices with: aplay -L | grep '^hdmi:'
     --enable-gpio-restart  Install the GPIO restart button monitor.
     --disable-gpio-restart Do not install the GPIO restart button monitor.
     --gpio-pin PIN       GPIO pin for the restart button (also enables it).
@@ -360,6 +361,26 @@ resolve_failover_browser() {
     fi
 }
 
+show_alsa_device_hint() {
+    local hdmi_devices
+
+    echo "To list available ALSA devices later, run: aplay -L"
+    if ! command -v aplay >/dev/null 2>&1; then
+        echo "Install alsa-utils to list device identifiers on this host."
+        return
+    fi
+
+    hdmi_devices=$(aplay -L 2>/dev/null | sed -n '/^hdmi:/p')
+    if [[ -n "$hdmi_devices" ]]; then
+        echo "Available HDMI ALSA devices:"
+        while IFS= read -r device; do
+            echo "  $device"
+        done <<< "$hdmi_devices"
+    else
+        echo "No HDMI ALSA devices were reported by aplay -L."
+    fi
+}
+
 resolve_audio_output() {
     if [[ -n "$AUDIO_OUTPUT_OPTION" ]]; then
         AUDIO_OUTPUT="$AUDIO_OUTPUT_OPTION"
@@ -377,6 +398,7 @@ resolve_audio_output() {
                     echo "--non-interactive --audio-output alsa requires --alsa-audio-device." >&2
                     exit 1
                 fi
+                show_alsa_device_hint
                 read -r -p "ALSA audio device [default: hdmi:CARD=PCH,DEV=0]: " ALSA_AUDIO_DEVICE
                 ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-hdmi:CARD=PCH,DEV=0}"
             fi

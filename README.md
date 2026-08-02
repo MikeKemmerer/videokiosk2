@@ -76,7 +76,15 @@ The installer writes the final values into generated scripts. `local.conf` can
 also set `FAILOVER_BROWSER` when you need to override the OS-based default.
 Use `--audio-output alsa --alsa-audio-device DEVICE` to make VLC use a specific
 ALSA device, such as `hdmi:CARD=PCH,DEV=0`; `--audio-output auto` retains VLC's
-normal output selection.
+normal output selection. Before choosing a device, list the host's identifiers:
+
+```bash
+aplay -L | grep '^hdmi:'
+```
+
+Use one full identifier from that output. The interactive ALSA prompt displays
+the same HDMI entries when `alsa-utils` is installed; try `DEV=0`, then the
+other listed devices if the connected display has no sound.
 Run it again to change settings.
 
 ## License
