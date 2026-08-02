@@ -64,7 +64,7 @@ Options:
     --xauthority PATH   Xauthority file for the kiosk user (auto-detected by default).
     --feed-url URL       Video feed URL.
     --browser-url URL    Failover browser URL.
-    --browser-scale SCALE  Falkon UI scale: 1, 1.25, 1.5, 1.75, or 2 (default: 1).
+    --browser-scale SCALE  Falkon UI scale: 1, 1.25, 1.5, 1.75, 2, 2.5, 3, or 4 (default: 1).
     --schedule-url URL   Restart schedule API URL.
     --restart-delay-minutes MINUTES  Delay scheduled restarts by this many minutes.
     --audio-output MODE   Select auto or alsa audio output (default: auto).
@@ -377,9 +377,9 @@ resolve_browser_scale() {
     BROWSER_SCALE="${BROWSER_SCALE:-1}"
 
     case "$BROWSER_SCALE" in
-        1|1.25|1.5|1.75|2) ;;
+        1|1.25|1.5|1.75|2|2.5|3|4) ;;
         *)
-            echo "BROWSER_SCALE must be 1, 1.25, 1.5, 1.75, or 2." >&2
+            echo "BROWSER_SCALE must be 1, 1.25, 1.5, 1.75, 2, 2.5, 3, or 4." >&2
             exit 1
             ;;
     esac
@@ -940,7 +940,7 @@ falkon_command() {
 
 validate_falkon_scale() {
     case "$BROWSER_SCALE" in
-        1|1.25|1.5|1.75|2) ;;
+        1|1.25|1.5|1.75|2|2.5|3|4) ;;
         *)
             log "WARN" "Invalid BROWSER_SCALE '$BROWSER_SCALE'; using 1"
             BROWSER_SCALE=1
