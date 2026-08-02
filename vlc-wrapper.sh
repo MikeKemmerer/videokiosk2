@@ -127,7 +127,7 @@ falkon_command() {
 
 validate_falkon_scale() {
     case "$BROWSER_SCALE" in
-        1|1.25|1.5|1.75|2) ;;
+        1|1.25|1.5|1.75|2|2.5|3|4) ;;
         *)
             log "WARN" "Invalid BROWSER_SCALE '$BROWSER_SCALE'; using 1"
             BROWSER_SCALE=1
