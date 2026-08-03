@@ -95,6 +95,8 @@ aplay -L | grep '^hdmi:'
 Use one full identifier from that output. The interactive ALSA prompt displays
 the same HDMI entries when `alsa-utils` is installed; try `DEV=0`, then the
 other listed devices if the connected display has no sound.
+The calendar failover URL and restart schedule API URL are stored separately.
+Calendar query parameters are never included in the schedule API default.
 Run it again to change settings.
 
 ## Releases
