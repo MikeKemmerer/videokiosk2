@@ -786,6 +786,25 @@ prompt_restart_delay_minutes() {
     fi
 }
 
+replace_template_token() {
+    local path="$1"
+    local token="$2"
+    local value="$3"
+
+    TEMPLATE_PATH="$path" TEMPLATE_TOKEN="$token" TEMPLATE_VALUE="$value" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["TEMPLATE_PATH"])
+token = os.environ["TEMPLATE_TOKEN"]
+value = os.environ["TEMPLATE_VALUE"]
+content = path.read_text()
+if token not in content:
+    raise SystemExit(f"template token not found: {token}")
+path.write_text(content.replace(token, value))
+PY
+}
+
 stop_service_if_running() {
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "Stopping existing $SERVICE_NAME..."
@@ -1487,7 +1506,7 @@ if tid:
 done
 EOF
 
-    sed -i "s|__SCHEDULE_URL__|$SCHEDULE_URL|g" "$tmpfile"
+    replace_template_token "$tmpfile" "__SCHEDULE_URL__" "$SCHEDULE_URL"
     sed -i "s|__RESTART_DELAY_MINUTES__|$RESTART_DELAY_MINUTES|g" "$tmpfile"
     sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
 
