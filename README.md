@@ -27,6 +27,8 @@ sudo bash videokiosk2-installer.sh --kiosk-user videokiosk
 
 Managed scripts are installed in `/opt/videokiosk2` and generated settings in
 `/etc/videokiosk2/local.conf`, rather than in the kiosk user's home directory.
+Each installation also records its release tag, source commit, and installation
+time in `/etc/videokiosk2/installed-version.json`.
 The user's home directory remains the location for optional `tvOn.sh` and
 `tvStandby.sh` hooks. Existing `/home/<user>/local.conf` files are read as
 defaults during the first upgrade and then migrated to `/etc/videokiosk2`.
@@ -103,7 +105,9 @@ backward-compatible features, and patch for fixes.
 
 After merging a stable release to `master`, push a SemVer tag such as `v1.0.0`.
 The **Publish Release** workflow creates the GitHub release and attaches a
-versioned source tarball. For branch testing, run that workflow from the branch
+versioned source tarball. Its tarball includes `RELEASE.json` with the exact
+tag and commit, which the installer records in the installed-version manifest.
+For branch testing, run that workflow from the branch
 with a tag such as `v1.1.0-rc.1`; it creates a GitHub prerelease rather than a
 latest stable release. Set `VERSION` to the intended final version (`1.1.0` in
 this example) before publishing the candidate.

@@ -2,6 +2,7 @@
 set -e
 
 SERVICE_NAME="videokiosk2.service"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIOSK_USER="${KIOSK_USER:-}"
 KIOSK_HOME="${KIOSK_HOME:-}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/videokiosk2}"
@@ -336,6 +337,37 @@ require_root() {
     fi
 }
 
+write_version_manifest() {
+    local manifest="$CONFIG_DIR/installed-version.json"
+    local release_file="$SOURCE_ROOT/RELEASE.json"
+    local version tag commit installed_at
+
+    version=$(tr -d '\r\n' < "$SOURCE_ROOT/VERSION" 2>/dev/null || echo "unknown")
+    tag="v$version"
+    commit=$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
+    if [[ -r "$release_file" ]]; then
+        version=$(jq -r '.version // empty' "$release_file" 2>/dev/null || echo "$version")
+        tag=$(jq -r '.tag // empty' "$release_file" 2>/dev/null || echo "$tag")
+        commit=$(jq -r '.commit // empty' "$release_file" 2>/dev/null || echo "$commit")
+    fi
+    [[ -n "$version" ]] || version="unknown"
+    [[ -n "$tag" ]] || tag="v$version"
+    [[ -n "$commit" ]] || commit="unknown"
+    installed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    jq -n \
+        --arg version "$version" \
+        --arg tag "$tag" \
+        --arg commit "$commit" \
+        --arg installed_at "$installed_at" \
+        '{version: $version, tag: $tag, commit: $commit, installed_at: $installed_at}' \
+        > "${manifest}.tmp"
+    mv "${manifest}.tmp" "$manifest"
+    chown root:root "$manifest"
+    chmod 644 "$manifest"
+    echo "Installed version: $tag ($commit)"
+}
+
 is_ubuntu() {
     [[ -r "$OS_RELEASE_FILE" ]] || return 1
     # shellcheck disable=SC1091
@@ -629,7 +661,7 @@ report_unavailable_prerequisites() {
 }
 
 install_packages() {
-    local required=(vlc "$FAILOVER_BROWSER" x11-apps x11-xserver-utils curl python3 cec-utils)
+    local required=(vlc "$FAILOVER_BROWSER" x11-apps x11-xserver-utils curl jq python3 cec-utils)
     if [[ "$FAILOVER_BROWSER" == "falkon" ]]; then
         required+=(x11-utils xdotool)
     fi
@@ -1836,6 +1868,7 @@ main() {
     stop_service_if_running
     write_wrapper
     write_local_conf
+    write_version_manifest
     write_scheduler_script
     write_service
     write_scheduler_service
