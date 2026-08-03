@@ -11,3 +11,6 @@ BROWSER_URL="http://your-calendar-server:8000"
 # FAILOVER_BROWSER="falkon"
 # Falkon UI scale. Supported values: 1, 1.25, 1.5, 1.75, 2, 2.5, 3, or 4.
 # BROWSER_SCALE="1"
+# Minutes to keep the failover browser visible before running tvStandby.sh.
+# Set to 0 to disable the standby hook timer.
+# STANDBY_AFTER_MINUTES="60"

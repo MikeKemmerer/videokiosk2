@@ -48,6 +48,7 @@ AUDIO_OUTPUT="${AUDIO_OUTPUT:-}"
 AUDIO_OUTPUT_OPTION=""
 ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
 ALSA_AUDIO_DEVICE_OPTION=""
+STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES:-60}"
 NON_INTERACTIVE=0
 ASSUME_YES=0
 GPIO_SELECTION_EXPLICIT=0
@@ -70,6 +71,7 @@ Options:
     --audio-output MODE   Select auto or alsa audio output (default: auto).
     --alsa-audio-device DEVICE  ALSA device used with --audio-output alsa.
                                Find HDMI devices with: aplay -L | grep '^hdmi:'
+    --standby-after-minutes MINUTES  Failover-browser duration before standby (default: 60; 0 disables).
     --enable-gpio-restart  Install the GPIO restart button monitor.
     --disable-gpio-restart Do not install the GPIO restart button monitor.
     --gpio-pin PIN       GPIO pin for the restart button (also enables it).
@@ -142,6 +144,11 @@ parse_arguments() {
             --alsa-audio-device)
                 ALSA_AUDIO_DEVICE_OPTION="${2:-}"
                 [[ -n "$ALSA_AUDIO_DEVICE_OPTION" ]] || { echo "--alsa-audio-device requires a device." >&2; exit 1; }
+                shift 2
+                ;;
+            --standby-after-minutes)
+                STANDBY_AFTER_MINUTES="${2:-}"
+                [[ -n "$STANDBY_AFTER_MINUTES" ]] || { echo "--standby-after-minutes requires minutes." >&2; exit 1; }
                 shift 2
                 ;;
             --enable-gpio-restart)
@@ -315,6 +322,7 @@ load_existing_config() {
         BROWSER_SCALE="${BROWSER_SCALE%$'\r'}"
         AUDIO_OUTPUT="${AUDIO_OUTPUT%$'\r'}"
         ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE%$'\r'}"
+        STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES%$'\r'}"
         [[ -n "${STREAM_URL:-}" ]] && DEFAULT_URL="$STREAM_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_BROWSER_URL="$BROWSER_URL"
         [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_SCHEDULE_URL="${BROWSER_URL}/api/service-restart-schedule"
@@ -829,6 +837,8 @@ if [[ -f "$CONFIG_PATH" ]]; then
     source "$CONFIG_PATH"
 fi
 
+STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES:-60}"
+
 THRESHOLD=5
 STARTUP_GRACE=20
 CHECK_INTERVAL=5
@@ -843,8 +853,7 @@ CPU_LOW_COUNT=0
 CPU_ZERO_COUNT=0
 
 LAST_FRAME_HASH=""
-
-STANDBY_MARKER="/tmp/videokiosk2-midori-start"
+STANDBY_TIMER_PID=""
 
 log() {
     local level="$1"
@@ -1035,9 +1044,11 @@ launch_midori() {
 
 launch_failover_browser() {
     detect_failover_browser
+    schedule_standby_actions
 
     if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
         launch_midori
+        cancel_standby_actions
         return
     fi
 
@@ -1061,44 +1072,36 @@ launch_failover_browser() {
         falkon_status=$?
         if (( falkon_status != 0 )); then
             log "ERROR" "Falkon exited with status $falkon_status; see $FAILOVER_LOG"
+            cancel_standby_actions
             return 1
         fi
     else
         log "INFO" "Falkon failover browser already running"
     fi
+    cancel_standby_actions
 }
 
-check_standby_timer() {
-    if [[ -f "$STANDBY_MARKER" ]]; then
-        local marker_epoch
-        marker_epoch=$(cat "$STANDBY_MARKER" 2>/dev/null)
-        if [[ "$marker_epoch" =~ ^[0-9]+$ ]]; then
-            local now_epoch elapsed
-            now_epoch=$(date +%s)
-            elapsed=$(( now_epoch - marker_epoch ))
-            if (( elapsed >= 3600 )); then
-                log "INFO" "Midori failover active for ${elapsed}s (>= 1 hour)"
-                rm -f "$STANDBY_MARKER"
-                if [[ -x "__HOOK_DIR__/tvStandby.sh" ]]; then
-                    log "INFO" "Running tvStandby.sh"
-                    __HOOK_DIR__/tvStandby.sh || log "WARN" "tvStandby.sh exited with code $?"
-                fi
-            fi
+schedule_standby_actions() {
+    if [[ ! "$STANDBY_AFTER_MINUTES" =~ ^[0-9]+$ ]]; then
+        log "WARN" "Invalid STANDBY_AFTER_MINUTES '$STANDBY_AFTER_MINUTES'; using 60"
+        STANDBY_AFTER_MINUTES=60
+    fi
+    (( STANDBY_AFTER_MINUTES > 0 )) || return
+
+    (
+        sleep "$((STANDBY_AFTER_MINUTES * 60))"
+        log "INFO" "Failover browser active for ${STANDBY_AFTER_MINUTES} minutes; running standby hook"
+        if [[ -x "__HOOK_DIR__/tvStandby.sh" ]]; then
+            __HOOK_DIR__/tvStandby.sh || log "WARN" "tvStandby.sh exited with code $?"
         fi
-    fi
+    ) &
+    STANDBY_TIMER_PID=$!
 }
 
-mark_midori_start() {
-    if [[ ! -f "$STANDBY_MARKER" ]]; then
-        date +%s > "$STANDBY_MARKER"
-        log "INFO" "Standby timer started (1 hour)"
-    fi
-}
-
-clear_standby_timer() {
-    if [[ -f "$STANDBY_MARKER" ]]; then
-        rm -f "$STANDBY_MARKER"
-        log "INFO" "Standby timer cleared (VLC active)"
+cancel_standby_actions() {
+    if [[ -n "$STANDBY_TIMER_PID" ]]; then
+        kill "$STANDBY_TIMER_PID" 2>/dev/null || true
+        STANDBY_TIMER_PID=""
     fi
 }
 
@@ -1144,18 +1147,15 @@ get_cpu_usage() {
 resolve_x11_session || exit 1
 disable_screen_blanking
 sleep 20
-check_standby_timer
 start_vlc
 sleep 5
 
 if ! vlc_running; then
     log "ERROR" "VLC failed to start; see $VLC_LOG"
     launch_failover_browser
-    mark_midori_start
     exit 0
 fi
 
-clear_standby_timer
 log "INFO" "VLC appears to be running. Entering monitoring loop."
 
 START_TIME=$(date +%s)
@@ -1205,7 +1205,6 @@ while vlc_running; do
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
         launch_failover_browser
-        mark_midori_start
         exit 0
     fi
 
@@ -1213,7 +1212,6 @@ while vlc_running; do
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
         kill "$VLC_PID" 2>/dev/null
         launch_failover_browser
-        mark_midori_start
         exit 0
     fi
 
@@ -1222,7 +1220,6 @@ done
 
 log "WARN" "VLC exited unexpectedly. Launching failover browser."
 launch_failover_browser
-mark_midori_start
 exit 0
 EOF
 
@@ -1269,6 +1266,7 @@ FAILOVER_BROWSER="$FAILOVER_BROWSER"
 BROWSER_SCALE="$BROWSER_SCALE"
 AUDIO_OUTPUT="$AUDIO_OUTPUT"
 ALSA_AUDIO_DEVICE="$ALSA_AUDIO_DEVICE"
+STANDBY_AFTER_MINUTES="$STANDBY_AFTER_MINUTES"
 LOCALEOF
 
     if [[ -f "$conf_path" ]]; then

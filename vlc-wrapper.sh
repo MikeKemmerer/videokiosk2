@@ -6,6 +6,7 @@ FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
 BROWSER_SCALE="${BROWSER_SCALE:-1}"
 AUDIO_OUTPUT="${AUDIO_OUTPUT:-auto}"
 ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
+STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES:-60}"
 
 # Source generated configuration, retaining the legacy adjacent config fallback
 # for manually run copies of this wrapper.
@@ -33,6 +34,7 @@ CPU_LOW_COUNT=0
 CPU_ZERO_COUNT=0
 
 LAST_FRAME_HASH=""
+STANDBY_TIMER_PID=""
 
 log() {
     local level="$1"
@@ -81,6 +83,39 @@ disable_screen_blanking() {
     xset s off || log "WARN" "Unable to disable the X11 screen saver"
     xset -dpms || log "WARN" "Unable to disable DPMS"
     xset s noblank || log "WARN" "Unable to disable X11 screen blanking"
+}
+
+validate_standby_duration() {
+    if [[ ! "$STANDBY_AFTER_MINUTES" =~ ^[0-9]+$ ]]; then
+        log "WARN" "Invalid STANDBY_AFTER_MINUTES '$STANDBY_AFTER_MINUTES'; using 60"
+        STANDBY_AFTER_MINUTES=60
+    fi
+}
+
+run_standby_actions() {
+    if [[ -x "$HOME/tvStandby.sh" ]]; then
+        log "INFO" "Running tvStandby.sh"
+        "$HOME/tvStandby.sh" || log "WARN" "tvStandby.sh exited with code $?"
+    fi
+}
+
+schedule_standby_actions() {
+    validate_standby_duration
+    (( STANDBY_AFTER_MINUTES > 0 )) || return
+
+    (
+        sleep "$((STANDBY_AFTER_MINUTES * 60))"
+        log "INFO" "Failover browser active for ${STANDBY_AFTER_MINUTES} minutes; running standby actions"
+        run_standby_actions
+    ) &
+    STANDBY_TIMER_PID=$!
+}
+
+cancel_standby_actions() {
+    if [[ -n "$STANDBY_TIMER_PID" ]]; then
+        kill "$STANDBY_TIMER_PID" 2>/dev/null || true
+        STANDBY_TIMER_PID=""
+    fi
 }
 
 detect_failover_browser() {
@@ -222,9 +257,11 @@ launch_midori() {
 
 launch_failover_browser() {
     detect_failover_browser
+    schedule_standby_actions
 
     if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
         launch_midori
+        cancel_standby_actions
         return
     fi
 
@@ -248,11 +285,13 @@ launch_failover_browser() {
         falkon_status=$?
         if (( falkon_status != 0 )); then
             log "ERROR" "Falkon exited with status $falkon_status; see $FAILOVER_LOG"
+            cancel_standby_actions
             return 1
         fi
     else
         log "INFO" "Falkon failover browser already running"
     fi
+    cancel_standby_actions
 }
 
 start_vlc() {

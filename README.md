@@ -67,6 +67,9 @@ profile: `sudo aa-enforce /etc/apparmor.d/videokiosk2`.
 	installs use Falkon. Falkon uses a private, extension-free session for each
 	failover, so it does not restore or accumulate previous tabs.
 3. A companion scheduler script polls a REST API for scheduled restarts (e.g., before a live stream begins) and restarts the systemd service on cue.
+	It runs the optional `tvOn.sh` hook after each scheduled restart. While the
+	failover browser is visible, it runs `tvStandby.sh` after
+	`STANDBY_AFTER_MINUTES` (60 by default).
 
 ## Configuration
 
