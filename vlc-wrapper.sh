@@ -29,12 +29,16 @@ FAILOVER_LOG="/tmp/videokiosk2-failover.log"
 
 CPU_IDLE_THRESHOLD=2
 PREV_CPU=20
+STREAM_PROBE_INTERVAL=30
+STREAM_PROBE_FAILURE_THRESHOLD=2
 
 FREEZE_COUNT=0
 CPU_LOW_COUNT=0
 CPU_ZERO_COUNT=0
+STREAM_PROBE_FAILURE_COUNT=0
 
 LAST_FRAME_HASH=""
+LAST_STREAM_PROBE=0
 STANDBY_TIMER_PID=""
 
 log() {
@@ -454,6 +458,22 @@ get_cpu_usage() {
     [[ -z "$cpu" ]] && echo 0 || echo "$cpu"
 }
 
+stream_data_available() {
+    STREAM_PROBE_URL="$STREAM_URL" python3 - <<'PY'
+import os
+import urllib.request
+
+try:
+    with urllib.request.urlopen(os.environ["STREAM_PROBE_URL"], timeout=4) as response:
+        data = response.read(188)
+except Exception:
+    raise SystemExit(1)
+
+if len(data) != 188:
+    raise SystemExit(1)
+PY
+}
+
 resolve_x11_session || exit 1
 disable_screen_blanking
 sleep 20
@@ -517,6 +537,17 @@ while vlc_running; do
         CPU_ZERO_COUNT=0
     fi
 
+    if (( NOW - LAST_STREAM_PROBE >= STREAM_PROBE_INTERVAL )); then
+        LAST_STREAM_PROBE=$NOW
+        if stream_data_available; then
+            (( STREAM_PROBE_FAILURE_COUNT > 0 )) && log "INFO" "Stream data probe recovered"
+            STREAM_PROBE_FAILURE_COUNT=0
+        elif (( STREAM_PROBE_FAILURE_COUNT < STREAM_PROBE_FAILURE_THRESHOLD )); then
+            ((STREAM_PROBE_FAILURE_COUNT++))
+            log "WARN" "Stream data probe failed: $STREAM_PROBE_FAILURE_COUNT of $STREAM_PROBE_FAILURE_THRESHOLD"
+        fi
+    fi
+
     if (( FREEZE_COUNT >= THRESHOLD && CPU_LOW_COUNT >= THRESHOLD )); then
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
         stop_process "$VLC_PID" "VLC before failover"
@@ -526,6 +557,13 @@ while vlc_running; do
 
     if (( CPU_ZERO_COUNT >= THRESHOLD )); then
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
+        stop_process "$VLC_PID" "VLC before failover"
+        launch_failover_browser
+        exit 0
+    fi
+
+    if (( STREAM_PROBE_FAILURE_COUNT >= STREAM_PROBE_FAILURE_THRESHOLD )); then
+        log "ERROR" "Stream data unavailable. Triggering failover."
         stop_process "$VLC_PID" "VLC before failover"
         launch_failover_browser
         exit 0
