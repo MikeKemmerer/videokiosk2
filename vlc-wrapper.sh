@@ -6,6 +6,7 @@ FAILOVER_BROWSER="${FAILOVER_BROWSER:-}"
 BROWSER_SCALE="${BROWSER_SCALE:-1}"
 AUDIO_OUTPUT="${AUDIO_OUTPUT:-auto}"
 ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
+STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES:-60}"
 
 # Source generated configuration, retaining the legacy adjacent config fallback
 # for manually run copies of this wrapper.
@@ -22,17 +23,23 @@ fi
 THRESHOLD=5
 STARTUP_GRACE=20
 CHECK_INTERVAL=5
+PROCESS_STOP_TIMEOUT=5
 VLC_LOG="/tmp/videokiosk2-vlc.log"
 FAILOVER_LOG="/tmp/videokiosk2-failover.log"
 
 CPU_IDLE_THRESHOLD=2
 PREV_CPU=20
+STREAM_PROBE_INTERVAL=30
+STREAM_PROBE_FAILURE_THRESHOLD=2
 
 FREEZE_COUNT=0
 CPU_LOW_COUNT=0
 CPU_ZERO_COUNT=0
+STREAM_PROBE_FAILURE_COUNT=0
 
 LAST_FRAME_HASH=""
+LAST_STREAM_PROBE=0
+STANDBY_TIMER_PID=""
 
 log() {
     local level="$1"
@@ -81,6 +88,39 @@ disable_screen_blanking() {
     xset s off || log "WARN" "Unable to disable the X11 screen saver"
     xset -dpms || log "WARN" "Unable to disable DPMS"
     xset s noblank || log "WARN" "Unable to disable X11 screen blanking"
+}
+
+validate_standby_duration() {
+    if [[ ! "$STANDBY_AFTER_MINUTES" =~ ^[0-9]+$ ]]; then
+        log "WARN" "Invalid STANDBY_AFTER_MINUTES '$STANDBY_AFTER_MINUTES'; using 60"
+        STANDBY_AFTER_MINUTES=60
+    fi
+}
+
+run_standby_actions() {
+    if [[ -x "$HOME/tvStandby.sh" ]]; then
+        log "INFO" "Running tvStandby.sh"
+        "$HOME/tvStandby.sh" || log "WARN" "tvStandby.sh exited with code $?"
+    fi
+}
+
+schedule_standby_actions() {
+    validate_standby_duration
+    (( STANDBY_AFTER_MINUTES > 0 )) || return
+
+    (
+        sleep "$((STANDBY_AFTER_MINUTES * 60))"
+        log "INFO" "Failover browser active for ${STANDBY_AFTER_MINUTES} minutes; running standby actions"
+        run_standby_actions
+    ) &
+    STANDBY_TIMER_PID=$!
+}
+
+cancel_standby_actions() {
+    if [[ -n "$STANDBY_TIMER_PID" ]]; then
+        kill "$STANDBY_TIMER_PID" 2>/dev/null || true
+        STANDBY_TIMER_PID=""
+    fi
 }
 
 detect_failover_browser() {
@@ -146,10 +186,12 @@ ensure_falkon_fullscreen() {
     for attempt in {1..10}; do
         window_id=$(xdotool search --onlyvisible --class falkon 2>/dev/null | tail -n 1)
         if [[ -n "$window_id" ]]; then
+            xdotool windowactivate "$window_id" 2>/dev/null || xdotool windowraise "$window_id" 2>/dev/null || true
             window_state=$(xprop -id "$window_id" _NET_WM_STATE 2>/dev/null || true)
             if [[ "$window_state" != *"_NET_WM_STATE_FULLSCREEN"* ]]; then
                 xdotool key --window "$window_id" F11
             fi
+            xdotool windowraise "$window_id" 2>/dev/null || true
             return
         fi
         sleep 1
@@ -196,6 +238,122 @@ configure_falkon_kiosk() {
     mv "$temporary_file" "$settings_file"
 }
 
+stop_process() {
+    local pid="$1"
+    local name="$2"
+    local deadline state
+
+    [[ -n "$pid" ]] || return
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        return
+    fi
+
+    log "INFO" "Stopping $name"
+    kill -TERM "$pid" 2>/dev/null || true
+    deadline=$((SECONDS + PROCESS_STOP_TIMEOUT))
+    while kill -0 "$pid" 2>/dev/null; do
+        state=$(ps -o stat= -p "$pid" 2>/dev/null)
+        [[ "$state" == Z* ]] && break
+        if (( SECONDS >= deadline )); then
+            log "WARN" "$name did not exit within ${PROCESS_STOP_TIMEOUT}s; sending SIGKILL"
+            kill -KILL "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 0.2
+    done
+    wait "$pid" 2>/dev/null || true
+}
+
+falkon_profile_ready() {
+    local profile_database="$1"
+
+    [[ -s "$profile_database" ]] || return 1
+    PROFILE_DATABASE="$profile_database" python3 - <<'PY'
+import os
+import sqlite3
+
+required_tables = {
+    "autofill",
+    "autofill_encrypted",
+    "autofill_exceptions",
+    "history",
+    "icons",
+    "search_engines",
+    "site_settings",
+}
+
+try:
+    connection = sqlite3.connect(os.environ["PROFILE_DATABASE"], timeout=1)
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = ?", ("table",)
+        )
+    }
+    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+except sqlite3.Error:
+    raise SystemExit(1)
+finally:
+    if "connection" in locals():
+        connection.close()
+
+if not required_tables.issubset(tables) or integrity != ("ok",):
+    raise SystemExit(1)
+PY
+}
+
+preserve_incomplete_falkon_database() {
+    local profile_database="$1"
+    local timestamp suffix path
+
+    timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+    for suffix in "" "-journal" "-wal" "-shm"; do
+        path="${profile_database}${suffix}"
+        [[ -e "$path" ]] || continue
+        mv "$path" "${profile_database}.incomplete-${timestamp}${suffix}"
+    done
+    log "WARN" "Preserved incomplete Falkon profile database with timestamp $timestamp"
+}
+
+initialize_falkon_profile() {
+    local falkon_path="$1"
+    local profile_database profile_dir bootstrap_pid attempt stable_checks
+
+    profile_dir="${XDG_CONFIG_HOME:-$HOME/.config}/falkon/profiles/default"
+    profile_database="$profile_dir/browsedata.db"
+    falkon_profile_ready "$profile_database" && return
+
+    if [[ -e "$profile_database" || -e "${profile_database}-journal" || -e "${profile_database}-wal" || -e "${profile_database}-shm" ]]; then
+        preserve_incomplete_falkon_database "$profile_database"
+    fi
+
+    log "INFO" "Initializing Falkon profile database"
+    env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=offscreen "$falkon_path" \
+        --no-extensions \
+        about:blank >>"$FAILOVER_LOG" 2>&1 &
+    bootstrap_pid=$!
+    stable_checks=0
+
+    for attempt in {1..40}; do
+        if falkon_profile_ready "$profile_database"; then
+            stable_checks=$((stable_checks + 1))
+            (( stable_checks >= 2 )) && break
+        else
+            stable_checks=0
+        fi
+        kill -0 "$bootstrap_pid" 2>/dev/null || break
+        sleep 0.25
+    done
+
+    stop_process "$bootstrap_pid" "Falkon profile bootstrap"
+    if ! falkon_profile_ready "$profile_database"; then
+        log "ERROR" "Falkon profile database did not initialize cleanly; see $FAILOVER_LOG"
+        return 1
+    fi
+    log "INFO" "Falkon profile database initialized"
+}
+
 launch_midori() {
     local midori_path midori_status
     if ! pgrep -x midori >/dev/null; then
@@ -224,7 +382,9 @@ launch_failover_browser() {
     detect_failover_browser
 
     if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
+        schedule_standby_actions
         launch_midori
+        cancel_standby_actions
         return
     fi
 
@@ -234,10 +394,12 @@ launch_failover_browser() {
             log "ERROR" "Failover browser is unavailable: install falkon and restart videokiosk2"
             return 1
         fi
-        configure_falkon_kiosk
         validate_falkon_scale
-        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
         : >"$FAILOVER_LOG"
+        initialize_falkon_profile "$falkon_path" || return 1
+        configure_falkon_kiosk
+        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
+        schedule_standby_actions
         env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR="$BROWSER_SCALE" "$falkon_path" \
             --private-browsing \
             --no-extensions \
@@ -248,11 +410,13 @@ launch_failover_browser() {
         falkon_status=$?
         if (( falkon_status != 0 )); then
             log "ERROR" "Falkon exited with status $falkon_status; see $FAILOVER_LOG"
+            cancel_standby_actions
             return 1
         fi
     else
         log "INFO" "Falkon failover browser already running"
     fi
+    cancel_standby_actions
 }
 
 start_vlc() {
@@ -294,6 +458,22 @@ get_cpu_usage() {
     [[ -z "$cpu" ]] && echo 0 || echo "$cpu"
 }
 
+stream_data_available() {
+    STREAM_PROBE_URL="$STREAM_URL" python3 - <<'PY'
+import os
+import urllib.request
+
+try:
+    with urllib.request.urlopen(os.environ["STREAM_PROBE_URL"], timeout=4) as response:
+        data = response.read(188)
+except Exception:
+    raise SystemExit(1)
+
+if len(data) != 188:
+    raise SystemExit(1)
+PY
+}
+
 resolve_x11_session || exit 1
 disable_screen_blanking
 sleep 20
@@ -322,8 +502,10 @@ while vlc_running; do
     FRAME_HASH=$(xwd -silent -root 2>/dev/null | md5sum | awk '{print $1}')
 
     if [[ "$FRAME_HASH" == "$LAST_FRAME_HASH" ]]; then
-        ((FREEZE_COUNT++))
-        log "WARN" "Freeze incremented: $FREEZE_COUNT of $THRESHOLD"
+        if (( FREEZE_COUNT < THRESHOLD )); then
+            ((FREEZE_COUNT++))
+            (( FREEZE_COUNT == THRESHOLD )) && log "WARN" "Frozen frame threshold reached"
+        fi
     else
         (( FREEZE_COUNT > 0 )) && log "INFO" "Freeze counter reset"
         FREEZE_COUNT=0
@@ -336,31 +518,53 @@ while vlc_running; do
     PREV_CPU=$CURR_CPU
 
     if (( AVG_CPU < CPU_IDLE_THRESHOLD )); then
-        ((CPU_LOW_COUNT++))
-        log "WARN" "Low CPU incremented: $CPU_LOW_COUNT of $THRESHOLD"
+        if (( CPU_LOW_COUNT < THRESHOLD )); then
+            ((CPU_LOW_COUNT++))
+            (( CPU_LOW_COUNT == THRESHOLD )) && log "WARN" "Low CPU threshold reached"
+        fi
     else
         (( CPU_LOW_COUNT > 0 )) && log "INFO" "Low CPU counter reset"
         CPU_LOW_COUNT=0
     fi
 
     if (( CURR_CPU == 0 )); then
-        ((CPU_ZERO_COUNT++))
-        log "WARN" "Zero CPU incremented: $CPU_ZERO_COUNT of $THRESHOLD"
+        if (( CPU_ZERO_COUNT < THRESHOLD )); then
+            ((CPU_ZERO_COUNT++))
+            (( CPU_ZERO_COUNT == THRESHOLD )) && log "WARN" "Zero CPU threshold reached"
+        fi
     else
         (( CPU_ZERO_COUNT > 0 )) && log "INFO" "Zero CPU counter reset"
         CPU_ZERO_COUNT=0
     fi
 
+    if (( NOW - LAST_STREAM_PROBE >= STREAM_PROBE_INTERVAL )); then
+        LAST_STREAM_PROBE=$NOW
+        if stream_data_available; then
+            (( STREAM_PROBE_FAILURE_COUNT > 0 )) && log "INFO" "Stream data probe recovered"
+            STREAM_PROBE_FAILURE_COUNT=0
+        elif (( STREAM_PROBE_FAILURE_COUNT < STREAM_PROBE_FAILURE_THRESHOLD )); then
+            ((STREAM_PROBE_FAILURE_COUNT++))
+            log "WARN" "Stream data probe failed: $STREAM_PROBE_FAILURE_COUNT of $STREAM_PROBE_FAILURE_THRESHOLD"
+        fi
+    fi
+
     if (( FREEZE_COUNT >= THRESHOLD && CPU_LOW_COUNT >= THRESHOLD )); then
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
-        kill "$VLC_PID" 2>/dev/null
+        stop_process "$VLC_PID" "VLC before failover"
         launch_failover_browser
         exit 0
     fi
 
     if (( CPU_ZERO_COUNT >= THRESHOLD )); then
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
-        kill "$VLC_PID" 2>/dev/null
+        stop_process "$VLC_PID" "VLC before failover"
+        launch_failover_browser
+        exit 0
+    fi
+
+    if (( STREAM_PROBE_FAILURE_COUNT >= STREAM_PROBE_FAILURE_THRESHOLD )); then
+        log "ERROR" "Stream data unavailable. Triggering failover."
+        stop_process "$VLC_PID" "VLC before failover"
         launch_failover_browser
         exit 0
     fi

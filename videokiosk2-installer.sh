@@ -2,6 +2,7 @@
 set -e
 
 SERVICE_NAME="videokiosk2.service"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIOSK_USER="${KIOSK_USER:-}"
 KIOSK_HOME="${KIOSK_HOME:-}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/videokiosk2}"
@@ -33,6 +34,13 @@ DEFAULT_GPIO_PIN=17
 INSTALL_GPIO=0
 GPIO_PIN=$DEFAULT_GPIO_PIN
 
+FIRETV_HID_SERVICE_NAME="videokiosk2-firetv-hid.service"
+FIRETV_HID_SERVICE_PATH="/etc/systemd/system/$FIRETV_HID_SERVICE_NAME"
+FIRETV_HID_SCRIPT_PATH="$INSTALL_DIR/firetv-hid.py"
+FIRETV_BLUEZ_OVERRIDE_PATH="/etc/systemd/system/bluetooth.service.d/videokiosk2-firetv-hid.conf"
+FIRETV_LEGACY_BLUEZ_OVERRIDE_PATH="/etc/systemd/system/bluetooth.service.d/firetv-hid.conf"
+FIRETV_BLUEZ_CONFIG_PATH="/etc/bluetooth/main.conf"
+
 DEFAULT_URL="http://your-stream-server:8086/2.ts"
 DEFAULT_BROWSER_URL="http://your-calendar-server:8000"
 DEFAULT_SCHEDULE_URL="http://your-calendar-server:8000/api/service-restart-schedule"
@@ -48,6 +56,21 @@ AUDIO_OUTPUT="${AUDIO_OUTPUT:-}"
 AUDIO_OUTPUT_OPTION=""
 ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE:-}"
 ALSA_AUDIO_DEVICE_OPTION=""
+STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES:-60}"
+FIRETV_BLUETOOTH_ENABLED="${FIRETV_BLUETOOTH_ENABLED:-false}"
+FIRETV_BLUETOOTH_OPTION=""
+FIRETV_DISPLAY_OUTPUT="${FIRETV_DISPLAY_OUTPUT:-}"
+FIRETV_DISPLAY_MODE="${FIRETV_DISPLAY_MODE:-}"
+FIRETV_DISPLAY_RATE="${FIRETV_DISPLAY_RATE:-}"
+FIRETV_DISPLAY_OUTPUT_OPTION=""
+FIRETV_DISPLAY_MODE_OPTION=""
+FIRETV_DISPLAY_RATE_OPTION=""
+FIRETV_BLUETOOTH_TARGET="${FIRETV_BLUETOOTH_TARGET:-}"
+FIRETV_NETWORK_MAC="${FIRETV_NETWORK_MAC:-}"
+FIRETV_NETWORK_BROADCAST="${FIRETV_NETWORK_BROADCAST:-255.255.255.255}"
+FIRETV_BLUETOOTH_TARGET_OPTION=""
+FIRETV_NETWORK_MAC_OPTION=""
+FIRETV_NETWORK_BROADCAST_OPTION=""
 NON_INTERACTIVE=0
 ASSUME_YES=0
 GPIO_SELECTION_EXPLICIT=0
@@ -70,6 +93,15 @@ Options:
     --audio-output MODE   Select auto or alsa audio output (default: auto).
     --alsa-audio-device DEVICE  ALSA device used with --audio-output alsa.
                                Find HDMI devices with: aplay -L | grep '^hdmi:'
+    --standby-after-minutes MINUTES  Failover-browser duration before standby (default: 60; 0 disables).
+    --enable-firetv-bluetooth  Install Bluetooth HID standby/wake control.
+    --disable-firetv-bluetooth Remove installer-managed Bluetooth HID control.
+    --firetv-display-output OUTPUT  X11 output paired with Fire TV power.
+    --firetv-display-mode MODE      X11 mode restored by the power-on hook.
+    --firetv-display-rate RATE      X11 refresh rate restored by power-on.
+    --firetv-bluetooth-target MAC   Paired Fire TV Bluetooth address.
+    --firetv-network-mac MAC        Fire TV network interface address for WOL.
+    --firetv-network-broadcast IP   Broadcast address for WOL.
     --enable-gpio-restart  Install the GPIO restart button monitor.
     --disable-gpio-restart Do not install the GPIO restart button monitor.
     --gpio-pin PIN       GPIO pin for the restart button (also enables it).
@@ -144,6 +176,49 @@ parse_arguments() {
                 [[ -n "$ALSA_AUDIO_DEVICE_OPTION" ]] || { echo "--alsa-audio-device requires a device." >&2; exit 1; }
                 shift 2
                 ;;
+            --standby-after-minutes)
+                STANDBY_AFTER_MINUTES="${2:-}"
+                [[ -n "$STANDBY_AFTER_MINUTES" ]] || { echo "--standby-after-minutes requires minutes." >&2; exit 1; }
+                shift 2
+                ;;
+            --enable-firetv-bluetooth)
+                FIRETV_BLUETOOTH_OPTION="true"
+                shift
+                ;;
+            --disable-firetv-bluetooth)
+                FIRETV_BLUETOOTH_OPTION="false"
+                shift
+                ;;
+            --firetv-display-output)
+                FIRETV_DISPLAY_OUTPUT_OPTION="${2:-}"
+                [[ -n "$FIRETV_DISPLAY_OUTPUT_OPTION" ]] || { echo "--firetv-display-output requires an output." >&2; exit 1; }
+                shift 2
+                ;;
+            --firetv-display-mode)
+                FIRETV_DISPLAY_MODE_OPTION="${2:-}"
+                [[ -n "$FIRETV_DISPLAY_MODE_OPTION" ]] || { echo "--firetv-display-mode requires a mode." >&2; exit 1; }
+                shift 2
+                ;;
+            --firetv-display-rate)
+                FIRETV_DISPLAY_RATE_OPTION="${2:-}"
+                [[ -n "$FIRETV_DISPLAY_RATE_OPTION" ]] || { echo "--firetv-display-rate requires a rate." >&2; exit 1; }
+                shift 2
+                ;;
+            --firetv-bluetooth-target)
+                FIRETV_BLUETOOTH_TARGET_OPTION="${2:-}"
+                [[ -n "$FIRETV_BLUETOOTH_TARGET_OPTION" ]] || { echo "--firetv-bluetooth-target requires a MAC address." >&2; exit 1; }
+                shift 2
+                ;;
+            --firetv-network-mac)
+                FIRETV_NETWORK_MAC_OPTION="${2:-}"
+                [[ -n "$FIRETV_NETWORK_MAC_OPTION" ]] || { echo "--firetv-network-mac requires a MAC address." >&2; exit 1; }
+                shift 2
+                ;;
+            --firetv-network-broadcast)
+                FIRETV_NETWORK_BROADCAST_OPTION="${2:-}"
+                [[ -n "$FIRETV_NETWORK_BROADCAST_OPTION" ]] || { echo "--firetv-network-broadcast requires an address." >&2; exit 1; }
+                shift 2
+                ;;
             --enable-gpio-restart)
                 INSTALL_GPIO=1
                 GPIO_SELECTION_EXPLICIT=1
@@ -188,6 +263,7 @@ parse_arguments() {
     WRAPPER_PATH="$INSTALL_DIR/vlc-wrapper.sh"
     SCHEDULER_SCRIPT_PATH="$INSTALL_DIR/videokiosk2-restart-scheduler.sh"
     GPIO_SCRIPT_PATH="$INSTALL_DIR/videokiosk2-gpio-restart.sh"
+    FIRETV_HID_SCRIPT_PATH="$INSTALL_DIR/firetv-hid.py"
     CONFIG_PATH="$CONFIG_DIR/local.conf"
 }
 
@@ -299,6 +375,11 @@ prepare_directories() {
 load_existing_config() {
     local conf_path="$CONFIG_PATH"
     local legacy_config="$KIOSK_HOME/local.conf"
+    local requested_browser_url="$BROWSER_URL"
+    local requested_schedule_url="$SCHEDULE_URL"
+    local requested_restart_delay="$RESTART_DELAY_MINUTES"
+    local config_stream_url config_browser_url config_schedule_url config_restart_delay
+    local calendar_base
 
     if [[ ! -f "$conf_path" && -f "$legacy_config" ]]; then
         conf_path="$legacy_config"
@@ -307,17 +388,74 @@ load_existing_config() {
 
     if [[ -f "$conf_path" ]]; then
         echo "Found existing config at $conf_path -- loading as defaults."
+        BROWSER_URL=""
+        SCHEDULE_URL=""
+        RESTART_DELAY_MINUTES=""
         source "$conf_path"
         # Strip trailing \r in case the file has Windows line endings
         STREAM_URL="${STREAM_URL%$'\r'}"
         BROWSER_URL="${BROWSER_URL%$'\r'}"
+        SCHEDULE_URL="${SCHEDULE_URL%$'\r'}"
+        RESTART_DELAY_MINUTES="${RESTART_DELAY_MINUTES%$'\r'}"
         FAILOVER_BROWSER="${FAILOVER_BROWSER%$'\r'}"
         BROWSER_SCALE="${BROWSER_SCALE%$'\r'}"
         AUDIO_OUTPUT="${AUDIO_OUTPUT%$'\r'}"
         ALSA_AUDIO_DEVICE="${ALSA_AUDIO_DEVICE%$'\r'}"
-        [[ -n "${STREAM_URL:-}" ]] && DEFAULT_URL="$STREAM_URL"
-        [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_BROWSER_URL="$BROWSER_URL"
-        [[ -n "${BROWSER_URL:-}" ]] && DEFAULT_SCHEDULE_URL="${BROWSER_URL}/api/service-restart-schedule"
+        STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES%$'\r'}"
+        FIRETV_BLUETOOTH_ENABLED="${FIRETV_BLUETOOTH_ENABLED%$'\r'}"
+        FIRETV_DISPLAY_OUTPUT="${FIRETV_DISPLAY_OUTPUT%$'\r'}"
+        FIRETV_DISPLAY_MODE="${FIRETV_DISPLAY_MODE%$'\r'}"
+        FIRETV_DISPLAY_RATE="${FIRETV_DISPLAY_RATE%$'\r'}"
+        FIRETV_BLUETOOTH_TARGET="${FIRETV_BLUETOOTH_TARGET%$'\r'}"
+        FIRETV_NETWORK_MAC="${FIRETV_NETWORK_MAC%$'\r'}"
+        FIRETV_NETWORK_BROADCAST="${FIRETV_NETWORK_BROADCAST%$'\r'}"
+        config_stream_url="${STREAM_URL:-}"
+        config_browser_url="${BROWSER_URL:-}"
+        config_schedule_url="${SCHEDULE_URL:-}"
+        config_restart_delay="${RESTART_DELAY_MINUTES:-}"
+        [[ -n "$config_stream_url" ]] && DEFAULT_URL="$config_stream_url"
+        [[ -n "$config_browser_url" ]] && DEFAULT_BROWSER_URL="$config_browser_url"
+        if [[ -n "$config_schedule_url" ]]; then
+            DEFAULT_SCHEDULE_URL="$config_schedule_url"
+        elif [[ -n "$config_browser_url" ]]; then
+            calendar_base=$(printf '%s' "$config_browser_url" | sed 's/[?#].*$//')
+            DEFAULT_SCHEDULE_URL="${calendar_base%/}/api/service-restart-schedule"
+        fi
+        if [[ "$config_restart_delay" =~ ^[0-9]+$ ]]; then
+            DEFAULT_RESTART_DELAY_MINUTES="$config_restart_delay"
+        fi
+        BROWSER_URL="$requested_browser_url"
+        SCHEDULE_URL="$requested_schedule_url"
+        RESTART_DELAY_MINUTES="$requested_restart_delay"
+    fi
+
+    if [[ -n "$FIRETV_BLUETOOTH_OPTION" ]]; then
+        FIRETV_BLUETOOTH_ENABLED="$FIRETV_BLUETOOTH_OPTION"
+    fi
+    [[ -n "$FIRETV_DISPLAY_OUTPUT_OPTION" ]] && FIRETV_DISPLAY_OUTPUT="$FIRETV_DISPLAY_OUTPUT_OPTION"
+    [[ -n "$FIRETV_DISPLAY_MODE_OPTION" ]] && FIRETV_DISPLAY_MODE="$FIRETV_DISPLAY_MODE_OPTION"
+    [[ -n "$FIRETV_DISPLAY_RATE_OPTION" ]] && FIRETV_DISPLAY_RATE="$FIRETV_DISPLAY_RATE_OPTION"
+    [[ -n "$FIRETV_BLUETOOTH_TARGET_OPTION" ]] && FIRETV_BLUETOOTH_TARGET="$FIRETV_BLUETOOTH_TARGET_OPTION"
+    [[ -n "$FIRETV_NETWORK_MAC_OPTION" ]] && FIRETV_NETWORK_MAC="$FIRETV_NETWORK_MAC_OPTION"
+    [[ -n "$FIRETV_NETWORK_BROADCAST_OPTION" ]] && FIRETV_NETWORK_BROADCAST="$FIRETV_NETWORK_BROADCAST_OPTION"
+    case "$FIRETV_BLUETOOTH_ENABLED" in
+        true|false) ;;
+        *)
+            echo "Invalid FIRETV_BLUETOOTH_ENABLED '$FIRETV_BLUETOOTH_ENABLED'; use true or false." >&2
+            exit 1
+            ;;
+    esac
+    if [[ "$FIRETV_BLUETOOTH_ENABLED" == "true" ]]; then
+        if [[ ! "$FIRETV_DISPLAY_OUTPUT" =~ ^[A-Za-z0-9._-]+$ || ! "$FIRETV_DISPLAY_MODE" =~ ^[0-9]+x[0-9]+([A-Za-z0-9._-]+)?$ || ! "$FIRETV_DISPLAY_RATE" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "Fire TV Bluetooth control requires valid display output, mode, and rate options." >&2
+            exit 1
+        fi
+        if [[ ! "$FIRETV_BLUETOOTH_TARGET" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ || ! "$FIRETV_NETWORK_MAC" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ || ! "$FIRETV_NETWORK_BROADCAST" =~ ^([0-9]{1,3}[.]){3}[0-9]{1,3}$ ]]; then
+            echo "Fire TV Bluetooth control requires valid Bluetooth, network MAC, and broadcast addresses." >&2
+            exit 1
+        fi
+        FIRETV_BLUETOOTH_TARGET="${FIRETV_BLUETOOTH_TARGET^^}"
+        FIRETV_NETWORK_MAC="${FIRETV_NETWORK_MAC^^}"
     fi
 }
 
@@ -326,6 +464,37 @@ require_root() {
         echo "This installer must be run as root (use sudo)." >&2
         exit 1
     fi
+}
+
+write_version_manifest() {
+    local manifest="$CONFIG_DIR/installed-version.json"
+    local release_file="$SOURCE_ROOT/RELEASE.json"
+    local version tag commit installed_at
+
+    version=$(tr -d '\r\n' < "$SOURCE_ROOT/VERSION" 2>/dev/null || echo "unknown")
+    tag="v$version"
+    commit=$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
+    if [[ -r "$release_file" ]]; then
+        version=$(jq -r '.version // empty' "$release_file" 2>/dev/null || echo "$version")
+        tag=$(jq -r '.tag // empty' "$release_file" 2>/dev/null || echo "$tag")
+        commit=$(jq -r '.commit // empty' "$release_file" 2>/dev/null || echo "$commit")
+    fi
+    [[ -n "$version" ]] || version="unknown"
+    [[ -n "$tag" ]] || tag="v$version"
+    [[ -n "$commit" ]] || commit="unknown"
+    installed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    jq -n \
+        --arg version "$version" \
+        --arg tag "$tag" \
+        --arg commit "$commit" \
+        --arg installed_at "$installed_at" \
+        '{version: $version, tag: $tag, commit: $commit, installed_at: $installed_at}' \
+        > "${manifest}.tmp"
+    mv "${manifest}.tmp" "$manifest"
+    chown root:root "$manifest"
+    chmod 644 "$manifest"
+    echo "Installed version: $tag ($commit)"
 }
 
 is_ubuntu() {
@@ -576,6 +745,15 @@ command_for_prerequisite() {
         xdotool) command -v xdotool ;;
         cec-utils) command -v cec-client ;;
         gpiod) command -v gpiomon ;;
+        bluez)
+            command -v bluetoothctl >/dev/null 2>&1 && command -v btmgmt
+            ;;
+        python3-dbus)
+            python3 -c 'import dbus' >/dev/null 2>&1 && printf '%s\n' python3-dbus
+            ;;
+        python3-gi)
+            python3 -c 'from gi.repository import GLib' >/dev/null 2>&1 && printf '%s\n' python3-gi
+            ;;
         *) command -v "$prerequisite" ;;
     esac
 }
@@ -612,6 +790,12 @@ report_unavailable_prerequisites() {
             gpiod)
                 echo "  - gpiomon command (normally provided by gpiod)"
                 ;;
+            bluez)
+                echo "  - BlueZ bluetoothctl and btmgmt commands (normally provided by bluez)"
+                ;;
+            python3-dbus|python3-gi)
+                echo "  - $prerequisite Python integration"
+                ;;
             *)
                 echo "  - $prerequisite command"
                 ;;
@@ -621,12 +805,15 @@ report_unavailable_prerequisites() {
 }
 
 install_packages() {
-    local required=(vlc "$FAILOVER_BROWSER" x11-apps x11-xserver-utils curl python3 cec-utils)
+    local required=(vlc "$FAILOVER_BROWSER" x11-apps x11-xserver-utils curl jq python3 cec-utils)
     if [[ "$FAILOVER_BROWSER" == "falkon" ]]; then
         required+=(x11-utils xdotool)
     fi
     if (( INSTALL_GPIO == 1 )); then
         required+=(gpiod)
+    fi
+    if [[ "$FIRETV_BLUETOOTH_ENABLED" == "true" ]]; then
+        required+=(bluez python3-dbus python3-gi)
     fi
     local missing=()
     local unavailable=()
@@ -778,6 +965,25 @@ prompt_restart_delay_minutes() {
     fi
 }
 
+replace_template_token() {
+    local path="$1"
+    local token="$2"
+    local value="$3"
+
+    TEMPLATE_PATH="$path" TEMPLATE_TOKEN="$token" TEMPLATE_VALUE="$value" python3 - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["TEMPLATE_PATH"])
+token = os.environ["TEMPLATE_TOKEN"]
+value = os.environ["TEMPLATE_VALUE"]
+content = path.read_text()
+if token not in content:
+    raise SystemExit(f"template token not found: {token}")
+path.write_text(content.replace(token, value))
+PY
+}
+
 stop_service_if_running() {
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "Stopping existing $SERVICE_NAME..."
@@ -793,6 +999,11 @@ stop_service_if_running() {
         echo "Stopping existing $GPIO_SERVICE_NAME..."
         systemctl stop "$GPIO_SERVICE_NAME"
     fi
+
+    if systemctl is-active --quiet "$FIRETV_HID_SERVICE_NAME"; then
+        echo "Stopping existing $FIRETV_HID_SERVICE_NAME..."
+        systemctl stop "$FIRETV_HID_SERVICE_NAME"
+    fi
 }
 
 confirm_overwrite() {
@@ -806,6 +1017,44 @@ confirm_overwrite() {
     fi
     read -r -p "Overwrite $path? (y/N): " answer
     [[ "$answer" == "y" || "$answer" == "Y" ]]
+}
+
+write_ntfy_notify() {
+    local dest="$INSTALL_DIR/ntfy-notify.sh"
+    if [[ ! -f "$SOURCE_ROOT/ntfy-notify.sh" ]]; then
+        echo "WARN: $SOURCE_ROOT/ntfy-notify.sh not found; skipping ntfy helper install" >&2
+        return
+    fi
+    cp "$SOURCE_ROOT/ntfy-notify.sh" "$dest"
+    chown root:root "$dest"
+    chmod 755 "$dest"
+    echo "Installed ntfy helper at $dest"
+    echo "  (set the alert topic with: echo YOUR_TOPIC | sudo tee $CONFIG_DIR/ntfy-topic)"
+}
+
+write_ntfy_failure_unit() {
+    local path="/etc/systemd/system/videokiosk2-ntfy-failure@.service"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    cat > "$tmpfile" <<EOF
+[Unit]
+Description=Send an ntfy alert that %i failed
+
+[Service]
+Type=oneshot
+ExecStart=$INSTALL_DIR/ntfy-notify.sh -t "videokiosk2 (%H)" -p high -k "unit-failed:%i" "Service %i failed"
+EOF
+
+    if [[ -f "$path" ]] && diff -u "$path" "$tmpfile" >/dev/null 2>&1; then
+        echo "$path is already up to date."
+        rm -f "$tmpfile"
+        return
+    fi
+    mv "$tmpfile" "$path"
+    chmod 644 "$path"
+    echo "Installed ntfy failure-alert unit at $path"
+    systemctl daemon-reload
 }
 
 write_wrapper() {
@@ -829,22 +1078,35 @@ if [[ -f "$CONFIG_PATH" ]]; then
     source "$CONFIG_PATH"
 fi
 
+STANDBY_AFTER_MINUTES="${STANDBY_AFTER_MINUTES:-60}"
+# State written for Church Monitoring; the *_SECONDS values exist so tests can run fast.
+STANDBY_STATE_DIR="${STANDBY_STATE_DIR:-/run/videokiosk2}"
+STANDBY_TICK_SECONDS="${STANDBY_TICK_SECONDS:-10}"
+STANDBY_UNIT_SECONDS="${STANDBY_UNIT_SECONDS:-60}"
+STANDBY_MAX_ADJUST_MINUTES=720
+
 THRESHOLD=5
 STARTUP_GRACE=20
 CHECK_INTERVAL=5
+PROCESS_STOP_TIMEOUT=5
 VLC_LOG="/tmp/videokiosk2-vlc.log"
 FAILOVER_LOG="/tmp/videokiosk2-failover.log"
 
 CPU_IDLE_THRESHOLD=2
 PREV_CPU=20
+STREAM_PROBE_INTERVAL=30
+STREAM_PROBE_FAILURE_THRESHOLD=2
 
 FREEZE_COUNT=0
 CPU_LOW_COUNT=0
 CPU_ZERO_COUNT=0
+STREAM_PROBE_FAILURE_COUNT=0
 
 LAST_FRAME_HASH=""
+LAST_STREAM_PROBE=0
+STANDBY_TIMER_PID=""
 
-STANDBY_MARKER="/tmp/videokiosk2-midori-start"
+NTFY_BIN="__NTFY_BIN__"
 
 log() {
     local level="$1"
@@ -855,6 +1117,9 @@ log() {
     local line="$ts videokiosk2.vlc-wrapper $level $msg"
     echo "$line"
     logger -t vlc-wrapper "$line"
+    if [[ "$level" == "ERROR" && -x "$NTFY_BIN" ]]; then
+        "$NTFY_BIN" -t "videokiosk2 ($(hostname))" -p high -k "vlc-wrapper:$msg" "$msg" &
+    fi
 }
 
 resolve_x11_session() {
@@ -959,10 +1224,12 @@ ensure_falkon_fullscreen() {
     for attempt in {1..10}; do
         window_id=$(xdotool search --onlyvisible --class falkon 2>/dev/null | tail -n 1)
         if [[ -n "$window_id" ]]; then
+            xdotool windowactivate "$window_id" 2>/dev/null || xdotool windowraise "$window_id" 2>/dev/null || true
             window_state=$(xprop -id "$window_id" _NET_WM_STATE 2>/dev/null || true)
             if [[ "$window_state" != *"_NET_WM_STATE_FULLSCREEN"* ]]; then
                 xdotool key --window "$window_id" F11
             fi
+            xdotool windowraise "$window_id" 2>/dev/null || true
             return
         fi
         sleep 1
@@ -1009,6 +1276,122 @@ configure_falkon_kiosk() {
     mv "$temporary_file" "$settings_file"
 }
 
+stop_process() {
+    local pid="$1"
+    local name="$2"
+    local deadline state
+
+    [[ -n "$pid" ]] || return
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        return
+    fi
+
+    log "INFO" "Stopping $name"
+    kill -TERM "$pid" 2>/dev/null || true
+    deadline=$((SECONDS + PROCESS_STOP_TIMEOUT))
+    while kill -0 "$pid" 2>/dev/null; do
+        state=$(ps -o stat= -p "$pid" 2>/dev/null)
+        [[ "$state" == Z* ]] && break
+        if (( SECONDS >= deadline )); then
+            log "WARN" "$name did not exit within ${PROCESS_STOP_TIMEOUT}s; sending SIGKILL"
+            kill -KILL "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 0.2
+    done
+    wait "$pid" 2>/dev/null || true
+}
+
+falkon_profile_ready() {
+    local profile_database="$1"
+
+    [[ -s "$profile_database" ]] || return 1
+    PROFILE_DATABASE="$profile_database" python3 - <<'PY'
+import os
+import sqlite3
+
+required_tables = {
+    "autofill",
+    "autofill_encrypted",
+    "autofill_exceptions",
+    "history",
+    "icons",
+    "search_engines",
+    "site_settings",
+}
+
+try:
+    connection = sqlite3.connect(os.environ["PROFILE_DATABASE"], timeout=1)
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = ?", ("table",)
+        )
+    }
+    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+except sqlite3.Error:
+    raise SystemExit(1)
+finally:
+    if "connection" in locals():
+        connection.close()
+
+if not required_tables.issubset(tables) or integrity != ("ok",):
+    raise SystemExit(1)
+PY
+}
+
+preserve_incomplete_falkon_database() {
+    local profile_database="$1"
+    local timestamp suffix path
+
+    timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+    for suffix in "" "-journal" "-wal" "-shm"; do
+        path="${profile_database}${suffix}"
+        [[ -e "$path" ]] || continue
+        mv "$path" "${profile_database}.incomplete-${timestamp}${suffix}"
+    done
+    log "WARN" "Preserved incomplete Falkon profile database with timestamp $timestamp"
+}
+
+initialize_falkon_profile() {
+    local falkon_path="$1"
+    local profile_database profile_dir bootstrap_pid attempt stable_checks
+
+    profile_dir="${XDG_CONFIG_HOME:-$HOME/.config}/falkon/profiles/default"
+    profile_database="$profile_dir/browsedata.db"
+    falkon_profile_ready "$profile_database" && return
+
+    if [[ -e "$profile_database" || -e "${profile_database}-journal" || -e "${profile_database}-wal" || -e "${profile_database}-shm" ]]; then
+        preserve_incomplete_falkon_database "$profile_database"
+    fi
+
+    log "INFO" "Initializing Falkon profile database"
+    env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=offscreen "$falkon_path" \
+        --no-extensions \
+        about:blank >>"$FAILOVER_LOG" 2>&1 &
+    bootstrap_pid=$!
+    stable_checks=0
+
+    for attempt in {1..40}; do
+        if falkon_profile_ready "$profile_database"; then
+            stable_checks=$((stable_checks + 1))
+            (( stable_checks >= 2 )) && break
+        else
+            stable_checks=0
+        fi
+        kill -0 "$bootstrap_pid" 2>/dev/null || break
+        sleep 0.25
+    done
+
+    stop_process "$bootstrap_pid" "Falkon profile bootstrap"
+    if ! falkon_profile_ready "$profile_database"; then
+        log "ERROR" "Falkon profile database did not initialize cleanly; see $FAILOVER_LOG"
+        return 1
+    fi
+    log "INFO" "Falkon profile database initialized"
+}
+
 launch_midori() {
     local midori_path midori_status
     if ! pgrep -x midori >/dev/null; then
@@ -1037,7 +1420,9 @@ launch_failover_browser() {
     detect_failover_browser
 
     if [[ "$FAILOVER_BROWSER" == "midori" ]]; then
+        schedule_standby_actions
         launch_midori
+        cancel_standby_actions
         return
     fi
 
@@ -1047,10 +1432,12 @@ launch_failover_browser() {
             log "ERROR" "Failover browser is unavailable: install falkon and restart videokiosk2"
             return 1
         fi
-        configure_falkon_kiosk
         validate_falkon_scale
-        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
         : >"$FAILOVER_LOG"
+        initialize_falkon_profile "$falkon_path" || return 1
+        configure_falkon_kiosk
+        log "INFO" "Launching Falkon failover browser with X11 backend at scale $BROWSER_SCALE"
+        schedule_standby_actions
         env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR="$BROWSER_SCALE" "$falkon_path" \
             --private-browsing \
             --no-extensions \
@@ -1061,44 +1448,72 @@ launch_failover_browser() {
         falkon_status=$?
         if (( falkon_status != 0 )); then
             log "ERROR" "Falkon exited with status $falkon_status; see $FAILOVER_LOG"
+            cancel_standby_actions
             return 1
         fi
     else
         log "INFO" "Falkon failover browser already running"
     fi
+    cancel_standby_actions
 }
 
-check_standby_timer() {
-    if [[ -f "$STANDBY_MARKER" ]]; then
-        local marker_epoch
-        marker_epoch=$(cat "$STANDBY_MARKER" 2>/dev/null)
-        if [[ "$marker_epoch" =~ ^[0-9]+$ ]]; then
-            local now_epoch elapsed
-            now_epoch=$(date +%s)
-            elapsed=$(( now_epoch - marker_epoch ))
-            if (( elapsed >= 3600 )); then
-                log "INFO" "Midori failover active for ${elapsed}s (>= 1 hour)"
-                rm -f "$STANDBY_MARKER"
-                if [[ -x "__HOOK_DIR__/tvStandby.sh" ]]; then
-                    log "INFO" "Running tvStandby.sh"
-                    __HOOK_DIR__/tvStandby.sh || log "WARN" "tvStandby.sh exited with code $?"
-                fi
-            fi
+standby_adjust_minutes() {
+    local adjust
+    adjust=$(cat "$STANDBY_STATE_DIR/standby-adjust" 2>/dev/null || true)
+    [[ "$adjust" =~ ^-?[0-9]+$ ]] || adjust=0
+    (( adjust < -STANDBY_AFTER_MINUTES )) && adjust=$(( -STANDBY_AFTER_MINUTES ))
+    (( adjust > STANDBY_MAX_ADJUST_MINUTES )) && adjust=$STANDBY_MAX_ADJUST_MINUTES
+    echo "$adjust"
+}
+
+# write_standby_state STATE [STARTED BASE ADJUST DEADLINE FIRED_AT]
+write_standby_state() {
+    [[ -d "$STANDBY_STATE_DIR" && -w "$STANDBY_STATE_DIR" ]] || return 0
+    local file="$STANDBY_STATE_DIR/standby.json" tmp
+    tmp="$file.$$"
+    printf '{"state":"%s","failover_started":%s,"base_minutes":%s,"adjust_minutes":%s,"deadline":%s,"fired_at":%s,"updated":%s,"unit_seconds":%s}\n' \
+        "$1" "${2:-null}" "${3:-null}" "${4:-0}" "${5:-null}" "${6:-null}" "$(date +%s)" "$STANDBY_UNIT_SECONDS" \
+        >"$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    return 0
+}
+
+schedule_standby_actions() {
+    if [[ ! "$STANDBY_AFTER_MINUTES" =~ ^[0-9]+$ ]]; then
+        log "WARN" "Invalid STANDBY_AFTER_MINUTES '$STANDBY_AFTER_MINUTES'; using 60"
+        STANDBY_AFTER_MINUTES=60
+    fi
+    if (( STANDBY_AFTER_MINUTES == 0 )); then
+        write_standby_state disabled
+        return
+    fi
+
+    local started
+    started=$(date +%s)
+    (
+        local adjust deadline now
+        while true; do
+            adjust=$(standby_adjust_minutes)
+            deadline=$(( started + (STANDBY_AFTER_MINUTES + adjust) * STANDBY_UNIT_SECONDS ))
+            now=$(date +%s)
+            (( now >= deadline )) && break
+            write_standby_state counting "$started" "$STANDBY_AFTER_MINUTES" "$adjust" "$deadline"
+            sleep "$STANDBY_TICK_SECONDS"
+        done
+        log "INFO" "Failover browser active for $((STANDBY_AFTER_MINUTES + adjust)) minutes; running standby hook"
+        write_standby_state fired "$started" "$STANDBY_AFTER_MINUTES" "$adjust" "$deadline" "$now"
+        if [[ -x "__HOOK_DIR__/tvStandby.sh" ]]; then
+            __HOOK_DIR__/tvStandby.sh || log "WARN" "tvStandby.sh exited with code $?"
         fi
-    fi
+    ) &
+    STANDBY_TIMER_PID=$!
 }
 
-mark_midori_start() {
-    if [[ ! -f "$STANDBY_MARKER" ]]; then
-        date +%s > "$STANDBY_MARKER"
-        log "INFO" "Standby timer started (1 hour)"
-    fi
-}
-
-clear_standby_timer() {
-    if [[ -f "$STANDBY_MARKER" ]]; then
-        rm -f "$STANDBY_MARKER"
-        log "INFO" "Standby timer cleared (VLC active)"
+cancel_standby_actions() {
+    if [[ -n "$STANDBY_TIMER_PID" ]]; then
+        kill "$STANDBY_TIMER_PID" 2>/dev/null || true
+        STANDBY_TIMER_PID=""
+        rm -f "$STANDBY_STATE_DIR/standby-adjust" 2>/dev/null || true
+        write_standby_state idle
     fi
 }
 
@@ -1141,21 +1556,34 @@ get_cpu_usage() {
     [[ -z "$cpu" ]] && echo 0 || echo "$cpu"
 }
 
+stream_data_available() {
+    STREAM_PROBE_URL="$STREAM_URL" python3 - <<'PY'
+import os
+import urllib.request
+
+try:
+    with urllib.request.urlopen(os.environ["STREAM_PROBE_URL"], timeout=4) as response:
+        data = response.read(188)
+except Exception:
+    raise SystemExit(1)
+
+if len(data) != 188:
+    raise SystemExit(1)
+PY
+}
+
 resolve_x11_session || exit 1
 disable_screen_blanking
 sleep 20
-check_standby_timer
 start_vlc
 sleep 5
 
 if ! vlc_running; then
     log "ERROR" "VLC failed to start; see $VLC_LOG"
     launch_failover_browser
-    mark_midori_start
     exit 0
 fi
 
-clear_standby_timer
 log "INFO" "VLC appears to be running. Entering monitoring loop."
 
 START_TIME=$(date +%s)
@@ -1172,8 +1600,10 @@ while vlc_running; do
     FRAME_HASH=$(xwd -silent -root 2>/dev/null | md5sum | awk '{print $1}')
 
     if [[ "$FRAME_HASH" == "$LAST_FRAME_HASH" ]]; then
-        ((FREEZE_COUNT++))
-        log "WARN" "Freeze incremented: $FREEZE_COUNT of $THRESHOLD"
+        if (( FREEZE_COUNT < THRESHOLD )); then
+            ((FREEZE_COUNT++))
+            (( FREEZE_COUNT == THRESHOLD )) && log "WARN" "Frozen frame threshold reached"
+        fi
     else
         (( FREEZE_COUNT > 0 )) && log "INFO" "Freeze counter reset"
         FREEZE_COUNT=0
@@ -1186,34 +1616,54 @@ while vlc_running; do
     PREV_CPU=$CURR_CPU
 
     if (( AVG_CPU < CPU_IDLE_THRESHOLD )); then
-        ((CPU_LOW_COUNT++))
-        log "WARN" "Low CPU incremented: $CPU_LOW_COUNT of $THRESHOLD"
+        if (( CPU_LOW_COUNT < THRESHOLD )); then
+            ((CPU_LOW_COUNT++))
+            (( CPU_LOW_COUNT == THRESHOLD )) && log "WARN" "Low CPU threshold reached"
+        fi
     else
         (( CPU_LOW_COUNT > 0 )) && log "INFO" "Low CPU counter reset"
         CPU_LOW_COUNT=0
     fi
 
     if (( CURR_CPU == 0 )); then
-        ((CPU_ZERO_COUNT++))
-        log "WARN" "Zero CPU incremented: $CPU_ZERO_COUNT of $THRESHOLD"
+        if (( CPU_ZERO_COUNT < THRESHOLD )); then
+            ((CPU_ZERO_COUNT++))
+            (( CPU_ZERO_COUNT == THRESHOLD )) && log "WARN" "Zero CPU threshold reached"
+        fi
     else
         (( CPU_ZERO_COUNT > 0 )) && log "INFO" "Zero CPU counter reset"
         CPU_ZERO_COUNT=0
     fi
 
+    if (( NOW - LAST_STREAM_PROBE >= STREAM_PROBE_INTERVAL )); then
+        LAST_STREAM_PROBE=$NOW
+        if stream_data_available; then
+            (( STREAM_PROBE_FAILURE_COUNT > 0 )) && log "INFO" "Stream data probe recovered"
+            STREAM_PROBE_FAILURE_COUNT=0
+        elif (( STREAM_PROBE_FAILURE_COUNT < STREAM_PROBE_FAILURE_THRESHOLD )); then
+            ((STREAM_PROBE_FAILURE_COUNT++))
+            log "WARN" "Stream data probe failed: $STREAM_PROBE_FAILURE_COUNT of $STREAM_PROBE_FAILURE_THRESHOLD"
+        fi
+    fi
+
     if (( FREEZE_COUNT >= THRESHOLD && CPU_LOW_COUNT >= THRESHOLD )); then
         log "ERROR" "Freeze + low CPU detected. Triggering failover."
-        kill "$VLC_PID" 2>/dev/null
+        stop_process "$VLC_PID" "VLC before failover"
         launch_failover_browser
-        mark_midori_start
         exit 0
     fi
 
     if (( CPU_ZERO_COUNT >= THRESHOLD )); then
         log "ERROR" "CPU stuck at zero. VLC likely not decoding. Triggering failover."
-        kill "$VLC_PID" 2>/dev/null
+        stop_process "$VLC_PID" "VLC before failover"
         launch_failover_browser
-        mark_midori_start
+        exit 0
+    fi
+
+    if (( STREAM_PROBE_FAILURE_COUNT >= STREAM_PROBE_FAILURE_THRESHOLD )); then
+        log "ERROR" "Stream data unavailable. Triggering failover."
+        stop_process "$VLC_PID" "VLC before failover"
+        launch_failover_browser
         exit 0
     fi
 
@@ -1222,7 +1672,6 @@ done
 
 log "WARN" "VLC exited unexpectedly. Launching failover browser."
 launch_failover_browser
-mark_midori_start
 exit 0
 EOF
 
@@ -1232,6 +1681,7 @@ EOF
     sed -i "s|__AUDIO_OUTPUT__|$AUDIO_OUTPUT|g" "$tmpfile"
     sed -i "s|__ALSA_AUDIO_DEVICE__|$ALSA_AUDIO_DEVICE|g" "$tmpfile"
     sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
+    sed -i "s|__NTFY_BIN__|$INSTALL_DIR/ntfy-notify.sh|g" "$tmpfile"
 
     if [[ -f "$WRAPPER_PATH" ]]; then
         if diff -u "$WRAPPER_PATH" "$tmpfile" >/dev/null 2>&1; then
@@ -1265,10 +1715,20 @@ write_local_conf() {
 # videokiosk2 local configuration — generated by installer
 STREAM_URL="$FEED_URL"
 BROWSER_URL="$BROWSER_URL"
+SCHEDULE_URL="$SCHEDULE_URL"
+RESTART_DELAY_MINUTES="$RESTART_DELAY_MINUTES"
 FAILOVER_BROWSER="$FAILOVER_BROWSER"
 BROWSER_SCALE="$BROWSER_SCALE"
 AUDIO_OUTPUT="$AUDIO_OUTPUT"
 ALSA_AUDIO_DEVICE="$ALSA_AUDIO_DEVICE"
+STANDBY_AFTER_MINUTES="$STANDBY_AFTER_MINUTES"
+FIRETV_BLUETOOTH_ENABLED="$FIRETV_BLUETOOTH_ENABLED"
+FIRETV_DISPLAY_OUTPUT="$FIRETV_DISPLAY_OUTPUT"
+FIRETV_DISPLAY_MODE="$FIRETV_DISPLAY_MODE"
+FIRETV_DISPLAY_RATE="$FIRETV_DISPLAY_RATE"
+FIRETV_BLUETOOTH_TARGET="$FIRETV_BLUETOOTH_TARGET"
+FIRETV_NETWORK_MAC="$FIRETV_NETWORK_MAC"
+FIRETV_NETWORK_BROADCAST="$FIRETV_NETWORK_BROADCAST"
 LOCALEOF
 
     if [[ -f "$conf_path" ]]; then
@@ -1489,7 +1949,7 @@ if tid:
 done
 EOF
 
-    sed -i "s|__SCHEDULE_URL__|$SCHEDULE_URL|g" "$tmpfile"
+    replace_template_token "$tmpfile" "__SCHEDULE_URL__" "$SCHEDULE_URL"
     sed -i "s|__RESTART_DELAY_MINUTES__|$RESTART_DELAY_MINUTES|g" "$tmpfile"
     sed -i "s|__HOOK_DIR__|$HOOK_DIR|g" "$tmpfile"
 
@@ -1531,14 +1991,18 @@ write_service() {
 [Unit]
 Description=VLC Kiosk Wrapper (videokiosk2)
 After=display-manager.service
+OnFailure=videokiosk2-ntfy-failure@%n.service
 
 [Service]
 Type=simple
 ExecStart=$WRAPPER_PATH
 Restart=always
 RestartSec=3
+SupplementaryGroups=video
 ${APPARMOR_SERVICE_DIRECTIVE}
 
+RuntimeDirectory=videokiosk2
+RuntimeDirectoryMode=0755
 KillMode=mixed
 KillSignal=SIGTERM
 SendSIGKILL=yes
@@ -1590,12 +2054,14 @@ write_scheduler_service() {
 Description=videokiosk2 Service Restart Scheduler
 After=network-online.target
 Wants=network-online.target
+OnFailure=videokiosk2-ntfy-failure@%n.service
 
 [Service]
 Type=simple
 ExecStart=$SCHEDULER_SCRIPT_PATH
 Restart=always
 RestartSec=10
+SupplementaryGroups=video
 ${APPARMOR_SERVICE_DIRECTIVE}
 
 [Install]
@@ -1624,6 +2090,232 @@ EOF
     echo "Installed scheduler service at $SCHEDULER_SERVICE_PATH"
 
     systemctl daemon-reload
+}
+
+write_firetv_hook() {
+    local path="$1"
+    local command="$2"
+    local tmpfile
+    local kiosk_group
+
+    tmpfile=$(mktemp)
+    if [[ "$command" == "wake" ]]; then
+        cat > "$tmpfile" <<EOF
+#!/bin/bash
+# Managed by videokiosk2 Fire TV Bluetooth integration.
+set -u
+display_status=0
+bluetooth_status=0
+env DISPLAY="$X_DISPLAY" XAUTHORITY="$XAUTHORITY_PATH" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR_PATH" \
+    xrandr --output "$FIRETV_DISPLAY_OUTPUT" --mode "$FIRETV_DISPLAY_MODE" --rate "$FIRETV_DISPLAY_RATE" || display_status=1
+python3 - "$FIRETV_NETWORK_MAC" "$FIRETV_NETWORK_BROADCAST" <<'PY' || bluetooth_status=1
+import socket
+import sys
+
+mac = bytes.fromhex(sys.argv[1].replace(":", ""))
+packet = b"\xff" * 6 + mac * 16
+for destination in (sys.argv[2], "255.255.255.255"):
+    channel = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    channel.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    for port in (7, 9):
+        channel.sendto(packet, (destination, port))
+    channel.close()
+PY
+for attempt in {1..20}; do
+    if "$FIRETV_HID_SCRIPT_PATH" send wake; then
+        bluetooth_status=0
+        break
+    fi
+    bluetooth_status=1
+    sleep 1
+done
+(( display_status == 0 )) || exit 1
+(( bluetooth_status == 0 )) || exit 2
+EOF
+    else
+        cat > "$tmpfile" <<EOF
+#!/bin/bash
+# Managed by videokiosk2 Fire TV Bluetooth integration.
+set -u
+display_status=0
+bluetooth_status=0
+"$FIRETV_HID_SCRIPT_PATH" send sleep || bluetooth_status=1
+env DISPLAY="$X_DISPLAY" XAUTHORITY="$XAUTHORITY_PATH" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR_PATH" \
+    xrandr --output "$FIRETV_DISPLAY_OUTPUT" --off || display_status=1
+(( display_status == 0 )) || exit 1
+(( bluetooth_status == 0 )) || exit 2
+EOF
+    fi
+
+    if [[ -f "$path" ]] && ! diff -u "$path" "$tmpfile" >/dev/null 2>&1; then
+        echo
+        echo "Existing $path found. Showing diff:"
+        diff -u "$path" "$tmpfile" || true
+        if ! confirm_overwrite "$path"; then
+            echo "Keeping existing display hook."
+            rm -f "$tmpfile"
+            return
+        fi
+        cp "$path" "$path.bak"
+    fi
+
+    kiosk_group=$(id -gn "$KIOSK_USER")
+    mv "$tmpfile" "$path"
+    chown "$KIOSK_USER:$kiosk_group" "$path"
+    chmod 755 "$path"
+    echo "Installed Fire TV Bluetooth hook at $path"
+}
+
+set_firetv_bluez_class() {
+    local action="$1"
+
+    FIRETV_BLUEZ_ACTION="$action" FIRETV_BLUEZ_CONFIG_PATH="$FIRETV_BLUEZ_CONFIG_PATH" python3 - <<'PY'
+import os
+import re
+import stat
+import tempfile
+from pathlib import Path
+
+action = os.environ["FIRETV_BLUEZ_ACTION"]
+path = Path(os.environ["FIRETV_BLUEZ_CONFIG_PATH"])
+start_marker = "# BEGIN videokiosk2 Fire TV HID"
+end_marker = "# END videokiosk2 Fire TV HID"
+
+if not path.exists():
+    raise SystemExit(f"BlueZ config not found: {path}")
+
+with path.open("r", encoding="utf-8", newline="") as source:
+    text = source.read()
+newline = "\r\n" if "\r\n" in text else "\n"
+lines = text.splitlines(keepends=True)
+filtered = []
+inside_managed_block = False
+for line in lines:
+    stripped = line.rstrip("\r\n")
+    if stripped == start_marker:
+        inside_managed_block = True
+        continue
+    if inside_managed_block:
+        if stripped == end_marker:
+            inside_managed_block = False
+        continue
+    filtered.append(line)
+if inside_managed_block:
+    raise SystemExit(f"Unclosed videokiosk2 block in {path}")
+
+if action == "enable":
+    general_start = next(
+        (index for index, line in enumerate(filtered) if line.strip().lower() == "[general]"),
+        None,
+    )
+    if general_start is None:
+        raise SystemExit(f"BlueZ config has no [General] section: {path}")
+    insert_at = len(filtered)
+    for index in range(general_start + 1, len(filtered)):
+        if re.fullmatch(r"\s*\[[^]]+\]\s*", filtered[index]):
+            insert_at = index
+            break
+    block = [
+        f"{start_marker}{newline}",
+        f"Class = 0x000540{newline}",
+        f"{end_marker}{newline}",
+    ]
+    filtered[insert_at:insert_at] = block
+elif action != "disable":
+    raise SystemExit(f"Unknown BlueZ config action: {action}")
+
+metadata = path.stat()
+with tempfile.NamedTemporaryFile(
+    mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False
+) as output:
+    output.writelines(filtered)
+    temporary_path = output.name
+os.chmod(temporary_path, stat.S_IMODE(metadata.st_mode))
+os.chown(temporary_path, metadata.st_uid, metadata.st_gid)
+os.replace(temporary_path, path)
+PY
+}
+
+configure_firetv_hid() {
+    local candidate
+    local bluetoothd_path
+    local tmpfile
+
+    [[ -f "$SOURCE_ROOT/firetv-hid.py" ]] || {
+        echo "Missing Fire TV HID source: $SOURCE_ROOT/firetv-hid.py" >&2
+        exit 1
+    }
+    bluetoothd_path=$(command -v bluetoothd 2>/dev/null || true)
+    if [[ -z "$bluetoothd_path" ]]; then
+        for candidate in /usr/libexec/bluetooth/bluetoothd /usr/lib/bluetooth/bluetoothd /usr/sbin/bluetoothd; do
+            if [[ -x "$candidate" ]]; then
+                bluetoothd_path="$candidate"
+                break
+            fi
+        done
+    fi
+    [[ -n "$bluetoothd_path" ]] || {
+        echo "Unable to locate bluetoothd after installing BlueZ" >&2
+        exit 1
+    }
+    install -m 755 "$SOURCE_ROOT/firetv-hid.py" "$FIRETV_HID_SCRIPT_PATH"
+    usermod -a -G video "$KIOSK_USER"
+    set_firetv_bluez_class enable
+
+    install -d -m 755 "$(dirname "$FIRETV_BLUEZ_OVERRIDE_PATH")"
+    rm -f "$FIRETV_LEGACY_BLUEZ_OVERRIDE_PATH"
+    cat > "$FIRETV_BLUEZ_OVERRIDE_PATH" <<EOF
+[Service]
+ExecStart=
+ExecStart=$bluetoothd_path --noplugin=input,hostname
+EOF
+    chmod 644 "$FIRETV_BLUEZ_OVERRIDE_PATH"
+
+    tmpfile=$(mktemp)
+    cat > "$tmpfile" <<EOF
+[Unit]
+Description=videokiosk2 Fire TV Bluetooth HID controller
+Requires=bluetooth.service
+After=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=$FIRETV_HID_SCRIPT_PATH serve --target $FIRETV_BLUETOOTH_TARGET
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    mv "$tmpfile" "$FIRETV_HID_SERVICE_PATH"
+    chmod 644 "$FIRETV_HID_SERVICE_PATH"
+
+    write_firetv_hook "$HOOK_DIR/tvOn.sh" wake
+    write_firetv_hook "$HOOK_DIR/tvStandby.sh" sleep
+    systemctl daemon-reload
+}
+
+remove_firetv_hid() {
+    local hook
+    local restart_bluetooth=0
+
+    systemctl disable --now "$FIRETV_HID_SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -f "$FIRETV_HID_SERVICE_PATH" "$FIRETV_HID_SCRIPT_PATH"
+    rm -f "$FIRETV_LEGACY_BLUEZ_OVERRIDE_PATH"
+    set_firetv_bluez_class disable
+    if [[ -f "$FIRETV_BLUEZ_OVERRIDE_PATH" ]]; then
+        rm -f "$FIRETV_BLUEZ_OVERRIDE_PATH"
+        restart_bluetooth=1
+    fi
+    for hook in "$HOOK_DIR/tvOn.sh" "$HOOK_DIR/tvStandby.sh"; do
+        if [[ -f "$hook" ]] && grep -q '^# Managed by videokiosk2 Fire TV Bluetooth integration\.$' "$hook"; then
+            rm -f "$hook"
+        fi
+    done
+    systemctl daemon-reload
+    if (( restart_bluetooth == 1 )) && systemctl is-active --quiet bluetooth.service; then
+        systemctl restart bluetooth.service
+    fi
 }
 
 write_gpio_script() {
@@ -1708,6 +2400,7 @@ write_gpio_service() {
 [Unit]
 Description=videokiosk2 GPIO Button Restart Monitor
 After=multi-user.target
+OnFailure=videokiosk2-ntfy-failure@%n.service
 
 [Service]
 Type=simple
@@ -1794,6 +2487,13 @@ enable_and_start_service() {
         systemctl enable "$GPIO_SERVICE_NAME"
         systemctl start "$GPIO_SERVICE_NAME"
     fi
+
+    if [[ "$FIRETV_BLUETOOTH_ENABLED" == "true" ]]; then
+        systemctl enable bluetooth.service
+        systemctl restart bluetooth.service
+        systemctl enable --now "$FIRETV_HID_SERVICE_NAME"
+        echo "Fire TV Bluetooth control is ready for pairing as '$(hostname) Remote'."
+    fi
 }
 
 main() {
@@ -1817,11 +2517,19 @@ main() {
     install_packages
     configure_apparmor
     stop_service_if_running
+    write_ntfy_notify
+    write_ntfy_failure_unit
     write_wrapper
     write_local_conf
+    write_version_manifest
     write_scheduler_script
     write_service
     write_scheduler_service
+    if [[ "$FIRETV_BLUETOOTH_ENABLED" == "true" ]]; then
+        configure_firetv_hid
+    else
+        remove_firetv_hid
+    fi
     if (( INSTALL_GPIO == 1 )); then
         write_gpio_script
         write_gpio_service
