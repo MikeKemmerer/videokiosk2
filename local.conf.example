@@ -14,3 +14,21 @@ BROWSER_URL="http://your-calendar-server:8000"
 # Minutes to keep the failover browser visible before running tvStandby.sh.
 # Set to 0 to disable the standby hook timer.
 # STANDBY_AFTER_MINUTES="60"
+# Set to true after installing Bluetooth HID control for a paired Fire TV.
+# FIRETV_BLUETOOTH_ENABLED="false"
+# Pair Fire TV power with the X11 output so HDMI cannot remain off after wake.
+# FIRETV_DISPLAY_OUTPUT="HDMI1"
+# FIRETV_DISPLAY_MODE="1920x1080"
+# FIRETV_DISPLAY_RATE="60"
+# Paired Fire TV Bluetooth address plus its network MAC/broadcast for WOL.
+# FIRETV_BLUETOOTH_TARGET="AA:BB:CC:DD:EE:FF"
+# FIRETV_NETWORK_MAC="11:22:33:44:55:66"
+# FIRETV_NETWORK_BROADCAST="192.0.2.255"
+
+# ntfy push alerts (optional): set the topic in /etc/videokiosk2/ntfy-topic,
+# e.g. `echo YOUR_TOPIC | sudo tee /etc/videokiosk2/ntfy-topic`. Never commit
+# the topic value; anyone who knows it can read and send to it on ntfy.sh.
+# videokiosk2.service, videokiosk2-scheduler.service and
+# videokiosk2-gpio-restart.service all alert on crash via systemd
+# OnFailure=; the VLC wrapper also alerts on its own ERROR-level log lines
+# (freeze/CPU-stuck detection, failover browser failures).

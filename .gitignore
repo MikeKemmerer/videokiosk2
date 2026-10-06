@@ -1,3 +1,9 @@
 *.log
 *.bak
 local.conf
+
+# ntfy alert topic — the only secret for push alerts; never commit a real one.
+# Written at /etc/videokiosk2/ntfy-topic on each deployed host, never in-repo;
+# this is a safety net in case a local copy is ever created here for testing.
+ntfy-topic
+**/ntfy-topic

@@ -8,6 +8,7 @@ A kiosk-mode video display system for Raspberry Pi. Plays an HLS/MPEG-TS video s
 - Automatic failover to Midori on Raspberry Pi OS and Falkon on other installs
 - Scheduled service restarts via an external API
 - Configurable restart delay with schedule-supersede logic
+- Optional Fire TV standby/wake control through Bluetooth HID
 - Systemd service integration
 
 ## Installation
@@ -32,6 +33,39 @@ time in `/etc/videokiosk2/installed-version.json`.
 The user's home directory remains the location for optional `tvOn.sh` and
 `tvStandby.sh` hooks. Existing `/home/<user>/local.conf` files are read as
 defaults during the first upgrade and then migrated to `/etc/videokiosk2`.
+
+### Fire TV Bluetooth Control
+
+On a kiosk with a supported Bluetooth adapter, enable synchronized Fire TV and
+X11 HDMI control with:
+
+```bash
+sudo bash videokiosk2-installer.sh --enable-firetv-bluetooth \
+	--firetv-display-output HDMI1 \
+	--firetv-display-mode 1920x1080 \
+	--firetv-display-rate 60
+```
+
+The installer adds the BlueZ and Python D-Bus dependencies, starts
+`videokiosk2-firetv-hid.service`, and advertises `<hostname> Remote`. On the
+Fire TV, open **Settings > Controllers & Bluetooth Devices > Other Bluetooth
+Devices > Add Bluetooth Devices** and select that name once. Pairing is retained
+by BlueZ across service and host restarts. Configure the paired Bluetooth MAC,
+network MAC, and LAN broadcast address with `--firetv-bluetooth-target`,
+`--firetv-network-mac`, and `--firetv-network-broadcast`. The On hook sends a
+Wake-on-LAN packet, then the daemon reconnects both bonded HID channels before
+sending System Wake. This recovers control automatically after standby or a
+BlueZ/host restart.
+
+The integration maps `tvStandby.sh` to the HID System Sleep report and
+HDMI-off action, and maps `tvOn.sh` to HDMI-mode restoration plus System Wake.
+The On hook restores HDMI even when Bluetooth is disconnected, preventing the
+output from being stranded off. Existing failover and scheduler behavior
+therefore uses both controls automatically. The BlueZ `input` plugin is disabled on an
+enabled kiosk because the custom HID profile must own the HID service UUID;
+the `hostname` plugin is also disabled so it cannot replace the configured HID
+device class. Locally attached Bluetooth keyboards and mice should not be used
+on that host. Disable the integration with `--disable-firetv-bluetooth`.
 
 The installer will prompt for:
 - **Video feed URL** — the HLS/MPEG-TS stream endpoint
@@ -73,6 +107,17 @@ profile: `sudo aa-enforce /etc/apparmor.d/videokiosk2`.
 	failover browser is visible, it runs `tvStandby.sh` after
 	`STANDBY_AFTER_MINUTES` (60 by default).
 
+### Standby countdown state
+
+The wrapper keeps the standby countdown in `/run/videokiosk2/standby.json`
+(created by the service's `RuntimeDirectory`, so it resets whenever the service
+restarts): `state` is `counting`, `fired`, `idle`, or `disabled`, with the
+failover start, base minutes, net adjustment, and deadline as epoch seconds. The
+wrapper re-reads `/run/videokiosk2/standby-adjust` (net minutes to add or
+subtract, clamped to `-STANDBY_AFTER_MINUTES` .. 720) every 10 seconds, so a
+root helper such as Church Monitoring's can extend or shorten the current
+countdown. The adjustment is cleared when the failover browser exits.
+
 ## Configuration
 
 Configuration can be supplied interactively or with `--feed-url`,
@@ -98,6 +143,22 @@ other listed devices if the connected display has no sound.
 The calendar failover URL and restart schedule API URL are stored separately.
 Calendar query parameters are never included in the schedule API default.
 Run it again to change settings.
+
+## Alerts
+
+The installer sets up an optional [ntfy](https://ntfy.sh) push alert on
+crashes: `videokiosk2.service`, `videokiosk2-scheduler.service`, and
+`videokiosk2-gpio-restart.service` all notify via systemd `OnFailure=`, and
+`vlc-wrapper.sh` also notifies on its own ERROR-level conditions (stream
+freeze/CPU-stuck detection, failover browser failures). Enable it by writing
+your topic to `/etc/videokiosk2/ntfy-topic`:
+
+```bash
+echo YOUR_TOPIC | sudo tee /etc/videokiosk2/ntfy-topic
+```
+
+Never commit this file or its value; anyone who knows an ntfy.sh topic can
+read and send to it. Repeated identical alerts are suppressed for 15 minutes.
 
 ## Releases
 
